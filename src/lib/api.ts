@@ -1,7 +1,7 @@
 import "server-only";
 
 import { NextResponse } from "next/server";
-import { getCurrentUser } from "@/lib/supabase/server";
+import { createAdminClient, getCurrentUser } from "@/lib/supabase/server";
 
 export async function requireUser() {
   const { supabase, user } = await getCurrentUser();
@@ -21,7 +21,7 @@ export async function requireUser() {
     };
   }
 
-  return { supabase, user };
+  return { supabase: createAdminClient() ?? supabase, user };
 }
 
 export function parseJsonError() {

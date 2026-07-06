@@ -163,7 +163,7 @@ function formatDatabaseError(error: {
   }
 
   if (error.code === "42501") {
-    return "Supabase blocked this insert with Row Level Security. Check that the migration policies were applied.";
+    return "Supabase blocked this insert with Row Level Security. Run supabase/migrations/202607060002_repair_rls_policies.sql in Supabase SQL Editor.";
   }
 
   if (error.code === "PGRST204") {

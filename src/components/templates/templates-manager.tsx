@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Field,
+  FieldDescription,
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field";
@@ -76,6 +77,20 @@ export function TemplatesManager({
   }
 
   async function saveTemplate() {
+    const subject = draft.subject.trim();
+    const body = draft.body.trim();
+    const name = draft.name.trim() || subject.slice(0, 80) || "Untitled template";
+
+    if (subject.length < 2) {
+      toast.error("Add a subject before saving the template.");
+      return;
+    }
+
+    if (body.length < 2) {
+      toast.error("Add an email body before saving the template.");
+      return;
+    }
+
     setIsSaving(true);
 
     try {
@@ -84,9 +99,9 @@ export function TemplatesManager({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: selectedId || undefined,
-          name: draft.name,
-          subject: draft.subject,
-          body: draft.body,
+          name,
+          subject,
+          body,
         }),
       });
       const json = await response.json();
@@ -211,6 +226,9 @@ export function TemplatesManager({
                       }
                       placeholder="Intro follow-up"
                     />
+                    <FieldDescription>
+                      Optional. If blank, EmailFlow AI uses the subject.
+                    </FieldDescription>
                   </Field>
                   <Field>
                     <FieldLabel htmlFor="templateSubject">Subject</FieldLabel>

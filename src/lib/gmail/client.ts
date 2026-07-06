@@ -1,0 +1,98 @@
+import "server-only";
+
+import { google } from "googleapis";
+import { env, hasGoogleEnv } from "@/lib/env";
+import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
+
+export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose"];
+
+export function createOAuthClient() {
+  if (!hasGoogleEnv()) {
+    throw new Error("Google OAuth environment variables are not configured.");
+  }
+
+  return new google.auth.OAuth2(
+    env.GOOGLE_CLIENT_ID,
+    env.GOOGLE_CLIENT_SECRET,
+    env.GOOGLE_REDIRECT_URI,
+  );
+}
+
+export function getGoogleAuthUrl(state: string) {
+  const client = createOAuthClient();
+
+  return client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: GMAIL_SCOPES,
+    state,
+  });
+}
+
+export async function exchangeCodeForEncryptedTokens(code: string) {
+  const client = createOAuthClient();
+  const { tokens } = await client.getToken(code);
+
+  if (!tokens.refresh_token && !tokens.access_token) {
+    throw new Error("Google did not return usable Gmail tokens.");
+  }
+
+  return {
+    accessTokenEncrypted: tokens.access_token
+      ? encryptSecret(tokens.access_token)
+      : null,
+    refreshTokenEncrypted: tokens.refresh_token
+      ? encryptSecret(tokens.refresh_token)
+      : null,
+    expiryDate: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
+    scope: tokens.scope ?? GMAIL_SCOPES.join(" "),
+  };
+}
+
+export function createGmailClient(connection: {
+  access_token_encrypted: string | null;
+  refresh_token_encrypted: string | null;
+  expiry_date: string | null;
+}) {
+  const client = createOAuthClient();
+
+  client.setCredentials({
+    access_token: connection.access_token_encrypted
+      ? decryptSecret(connection.access_token_encrypted)
+      : undefined,
+    refresh_token: connection.refresh_token_encrypted
+      ? decryptSecret(connection.refresh_token_encrypted)
+      : undefined,
+    expiry_date: connection.expiry_date
+      ? new Date(connection.expiry_date).getTime()
+      : undefined,
+  });
+
+  return google.gmail({ version: "v1", auth: client });
+}
+
+export function createRawEmail(input: {
+  to: string;
+  from?: string;
+  subject: string;
+  body: string;
+}) {
+  const headers = [
+    `To: ${input.to}`,
+    input.from ? `From: ${input.from}` : "",
+    `Subject: ${encodeHeader(input.subject)}`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: 7bit",
+  ].filter(Boolean);
+
+  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${input.body}`)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function encodeHeader(value: string) {
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}

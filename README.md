@@ -1,36 +1,65 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# EmailFlow AI
 
-## Getting Started
+EmailFlow AI is a production-oriented Next.js 15 app for permission-based Gmail draft automation. It includes Supabase auth/database, Gmail OAuth with compose scope, reusable templates, CSV contact imports, personalization previews, draft creation, explicit send confirmation, rate limiting, and RLS-backed data isolation.
 
-First, run the development server:
+## Stack
+
+- Next.js 15 App Router, TypeScript, Tailwind CSS
+- shadcn/ui base-nova components
+- Supabase Auth and Postgres with RLS
+- Google OAuth and Gmail API
+- Zod, React Hook Form, Papaparse, Vitest
+
+## Local Setup
+
+1. Copy `.env.example` to `.env.local` and fill in values.
+2. Run the SQL in `supabase/migrations/202607060001_initial_schema.sql` in your Supabase project.
+3. Configure Google OAuth with the Gmail API enabled and `GOOGLE_REDIRECT_URI` pointing to `/api/gmail/callback`.
+4. Start the app:
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Required Environment
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=
+NEXT_PUBLIC_APP_URL=
+ENCRYPTION_KEY=
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+`ENCRYPTION_KEY` can be a long random string, a 32-byte hex value, or a 32-byte base64 value. Gmail tokens are encrypted server-side before storage.
 
-## Learn More
+## Safety Defaults
 
-To learn more about Next.js, take a look at the following resources:
+- Gmail draft creation is the primary flow.
+- Sending requires explicit confirmation and a permission checkbox.
+- Campaigns are capped at 50 recipients by default.
+- API routes require Supabase auth and Zod validation.
+- Sensitive Gmail routes are rate limited.
+- The app does not support scraping, purchased lists, hidden sender identity, or unsolicited bulk email.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Validation
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run lint
+npm run test
+npm run build
+```
 
-## Deploy on Vercel
+## Vercel Deployment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Set the same environment variables in Vercel, then deploy:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npx vercel
+```
+
+For production, set `NEXT_PUBLIC_APP_URL` and `GOOGLE_REDIRECT_URI` to the deployed URL.

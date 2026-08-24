@@ -1,7 +1,6 @@
 import "server-only";
 
 import { google, type gmail_v1 } from "googleapis";
-import type { OAuth2Client } from "google-auth-library";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { env, hasGoogleEnv } from "@/lib/env";
 import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
@@ -19,6 +18,9 @@ export function createOAuthClient() {
     env.GOOGLE_REDIRECT_URI,
   );
 }
+
+/** Use the OAuth2 type from googleapis itself to avoid duplicate google-auth-library type conflicts. */
+type GoogleOAuthClient = ReturnType<typeof createOAuthClient>;
 
 export function getGoogleAuthUrl(state: string) {
   const client = createOAuthClient();
@@ -59,7 +61,7 @@ export type GmailConnection = {
 };
 
 export function createGmailAuth(connection: GmailConnection): {
-  auth: OAuth2Client;
+  auth: GoogleOAuthClient;
   gmail: gmail_v1.Gmail;
 } {
   const auth = createOAuthClient();
@@ -90,7 +92,7 @@ export function createGmailClient(connection: GmailConnection) {
 export async function persistGmailTokens(
   supabase: SupabaseClient,
   userId: string,
-  auth: OAuth2Client,
+  auth: GoogleOAuthClient,
 ) {
   const credentials = auth.credentials;
 

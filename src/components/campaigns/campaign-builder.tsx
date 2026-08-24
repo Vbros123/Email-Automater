@@ -157,7 +157,12 @@ export function CampaignBuilder({
       return;
     }
 
+    const recipientCount = selectedContactIds.length || "your";
     setIsDrafting(true);
+    toast.message(`Creating Gmail drafts for ${recipientCount} recipients…`, {
+      description: "This can take 15–60 seconds for large lists. Keep this tab open.",
+      duration: 8000,
+    });
 
     try {
       const response = await fetch(`/api/campaigns/${campaignId}/drafts`, {
@@ -168,7 +173,7 @@ export function CampaignBuilder({
       const json = await response.json();
 
       if (!response.ok) {
-        throw new Error(json.error ?? "Could not create Gmail drafts.");
+        throw new Error(json.error ?? json.message ?? "Could not create Gmail drafts.");
       }
 
       setResults(json.results ?? []);
@@ -179,11 +184,17 @@ export function CampaignBuilder({
       } else {
         toast.error(
           json.message ??
-            "Created 0 drafts. Check missing variables or Gmail connection.",
+            "Created 0 drafts. Check the results table or reconnect Gmail.",
         );
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not create drafts.");
+      const message =
+        error instanceof Error ? error.message : "Could not create drafts.";
+      toast.error(
+        message.includes("fetch") || message.includes("Failed")
+          ? "Request timed out or failed. Try fewer recipients or try again."
+          : message,
+      );
     } finally {
       setIsDrafting(false);
     }
@@ -195,6 +206,10 @@ export function CampaignBuilder({
     if (!campaignId || !permissionConfirmed) return;
 
     setIsSending(true);
+    toast.message("Sending emails…", {
+      description: "Large batches can take a minute. Keep this tab open.",
+      duration: 6000,
+    });
 
     try {
       const response = await fetch(`/api/campaigns/${campaignId}/send`, {
@@ -330,11 +345,23 @@ export function CampaignBuilder({
               </div>
             </Field>
 
+            {isDrafting && (
+              <Alert className="border-primary/30 bg-accent">
+                <Loader2Icon className="animate-spin" />
+                <AlertTitle>Creating Gmail drafts…</AlertTitle>
+                <AlertDescription>
+                  Working through {selectedContactIds.length || "your"} recipients.
+                  Large lists can take up to a minute — leave this tab open.
+                </AlertDescription>
+              </Alert>
+            )}
+
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
               <Button
                 onClick={createCampaign}
                 disabled={
                   isCreating ||
+                  isDrafting ||
                   !name.trim() ||
                   !templateId ||
                   selectedContactIds.length === 0
@@ -350,19 +377,19 @@ export function CampaignBuilder({
               <Button
                 variant="outline"
                 onClick={createDrafts}
-                disabled={isDrafting || !activeCampaignId}
+                disabled={isDrafting || isCreating || !activeCampaignId}
               >
                 {isDrafting ? (
                   <Loader2Icon data-icon="inline-start" className="animate-spin" />
                 ) : (
                   <MailCheckIcon data-icon="inline-start" />
                 )}
-                Create Gmail drafts
+                {isDrafting ? "Creating drafts…" : "Create Gmail drafts"}
               </Button>
               <Button
                 variant="secondary"
                 onClick={() => setSendDialogOpen(true)}
-                disabled={!activeCampaignId}
+                disabled={!activeCampaignId || isDrafting}
               >
                 <SendIcon data-icon="inline-start" />
                 Send emails

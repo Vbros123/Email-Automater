@@ -10,9 +10,33 @@ import {
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { sendConfirmationSchema } from "@/lib/validators";
 
+export const maxDuration = 60;
+
 type Params = {
   params: Promise<{ campaignId: string }>;
 };
+
+const GMAIL_CONCURRENCY = 5;
+
+async function mapPool<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function run() {
+    while (nextIndex < items.length) {
+      const current = nextIndex++;
+      results[current] = await worker(items[current]);
+    }
+  }
+
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, () => run());
+  await Promise.all(runners);
+  return results;
+}
 
 export async function POST(request: NextRequest, { params }: Params) {
   const auth = await requireUser();
@@ -91,21 +115,19 @@ export async function POST(request: NextRequest, { params }: Params) {
   }
 
   const { gmail, auth: oauthClient } = gmailAuth;
-  const results: Array<{ email: string; status: string; detail?: string }> = [];
   let stoppedForAuth = false;
 
-  for (const recipient of recipients) {
-    if (!recipient.gmail_draft_id) {
-      continue;
-    }
+  const ready = recipients.filter((recipient) => recipient.gmail_draft_id);
 
+  const outcome = await mapPool(ready, GMAIL_CONCURRENCY, async (recipient) => {
     if (stoppedForAuth) {
-      results.push({
+      return {
+        id: recipient.id,
         email: recipient.email,
-        status: "failed",
+        status: "failed" as const,
         detail: "Skipped after Gmail auth failure.",
-      });
-      continue;
+        messageId: null as string | null,
+      };
     }
 
     try {
@@ -114,44 +136,66 @@ export async function POST(request: NextRequest, { params }: Params) {
         requestBody: { id: recipient.gmail_draft_id },
       });
 
-      await auth.supabase
-        .from("campaign_recipients")
-        .update({
-          status: "sent",
-          gmail_message_id: sent.data.id ?? null,
-          error_message: null,
-        })
-        .eq("id", recipient.id)
-        .eq("user_id", auth.user.id);
-
-      await auth.supabase.from("email_activity").insert({
-        user_id: auth.user.id,
-        campaign_id: campaign.id,
-        recipient_email: recipient.email,
-        action: "sent",
-        status: "success",
-        detail: sent.data.id ?? null,
-      });
-
-      results.push({ email: recipient.email, status: "sent" });
+      return {
+        id: recipient.id,
+        email: recipient.email,
+        status: "sent" as const,
+        detail: sent.data.id ?? undefined,
+        messageId: sent.data.id ?? null,
+      };
     } catch (error) {
-      const detail = getGmailErrorMessage(error);
-
-      await auth.supabase
-        .from("campaign_recipients")
-        .update({
-          status: "failed",
-          error_message: detail,
-        })
-        .eq("id", recipient.id)
-        .eq("user_id", auth.user.id);
-
-      results.push({ email: recipient.email, status: "failed", detail });
-
       if (isGmailAuthError(error)) {
         stoppedForAuth = true;
       }
+
+      return {
+        id: recipient.id,
+        email: recipient.email,
+        status: "failed" as const,
+        detail: getGmailErrorMessage(error),
+        messageId: null as string | null,
+      };
     }
+  });
+
+  const sent = outcome.filter((item) => item.status === "sent");
+  const failed = outcome.filter((item) => item.status === "failed");
+
+  await Promise.all([
+    ...sent.map((item) =>
+      auth.supabase
+        .from("campaign_recipients")
+        .update({
+          status: "sent",
+          gmail_message_id: item.messageId,
+          error_message: null,
+        })
+        .eq("id", item.id)
+        .eq("user_id", auth.user.id),
+    ),
+    ...failed.map((item) =>
+      auth.supabase
+        .from("campaign_recipients")
+        .update({
+          status: "failed",
+          error_message: item.detail ?? "Gmail send failed.",
+        })
+        .eq("id", item.id)
+        .eq("user_id", auth.user.id),
+    ),
+  ]);
+
+  if (outcome.length) {
+    await auth.supabase.from("email_activity").insert(
+      outcome.map((item) => ({
+        user_id: auth.user.id,
+        campaign_id: campaign.id,
+        recipient_email: item.email,
+        action: item.status === "sent" ? "sent" : "failed",
+        status: item.status === "sent" ? "success" : "failed",
+        detail: item.detail ?? null,
+      })),
+    );
   }
 
   try {
@@ -160,7 +204,7 @@ export async function POST(request: NextRequest, { params }: Params) {
     // best-effort
   }
 
-  const sentCount = results.filter((result) => result.status === "sent").length;
+  const sentCount = sent.length;
 
   await auth.supabase
     .from("campaigns")
@@ -168,5 +212,8 @@ export async function POST(request: NextRequest, { params }: Params) {
     .eq("id", campaign.id)
     .eq("user_id", auth.user.id);
 
-  return NextResponse.json({ results, sentCount });
+  return NextResponse.json({
+    results: outcome.map(({ email, status, detail }) => ({ email, status, detail })),
+    sentCount,
+  });
 }

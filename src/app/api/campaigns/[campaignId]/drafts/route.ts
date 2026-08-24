@@ -124,7 +124,6 @@ export async function POST(request: NextRequest, { params }: Params) {
   }
 
   const { gmail, auth: oauthClient } = gmailAuth;
-  const fromAddress = connection.google_email ?? auth.user.email ?? undefined;
   const results: Array<{ email: string; status: string; detail?: string }> = [];
   let stoppedForAuth = false;
 
@@ -138,7 +137,6 @@ export async function POST(request: NextRequest, { params }: Params) {
       continue;
     }
 
-    // Always soft-resolve optional vars — only name/email matter.
     const personalized = personalizeTemplate(
       typedTemplate,
       toPersonalizationContact(contact),
@@ -149,13 +147,14 @@ export async function POST(request: NextRequest, { params }: Params) {
     );
 
     try {
+      // Do NOT pass From — Gmail uses the connected mailbox.
+      // A mismatched From (e.g. app login email) causes HTTP 400 Bad Request.
       const draft = await gmail.users.drafts.create({
         userId: "me",
         requestBody: {
           message: {
             raw: createRawEmail({
               to: contact.email,
-              from: fromAddress,
               subject: personalized.subject || "(no subject)",
               body: personalized.body || "",
             }),
@@ -204,7 +203,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   try {
     await persistGmailTokens(auth.supabase, auth.user.id, oauthClient);
   } catch {
-    // Token persistence is best-effort; draft results still matter.
+    // best-effort
   }
 
   const successfulDrafts = results.filter((result) => result.status === "draft_created").length;

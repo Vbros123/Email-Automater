@@ -124,29 +124,35 @@ export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
   await gmail.users.drafts.list({ userId: "me", maxResults: 1 });
 }
 
+/**
+ * Build a minimal RFC 2822 message and base64url-encode it for Gmail drafts.create.
+ * Intentionally omits From — Gmail assigns the authenticated mailbox.
+ * Setting From to a non-connected address causes HTTP 400 Bad Request.
+ */
 export function createRawEmail(input: {
   to: string;
-  from?: string;
   subject: string;
   body: string;
 }) {
-  // Gmail expects a full RFC 2822 message, then base64url-encoded.
-  const lines = [
-    `To: ${sanitizeHeader(input.to)}`,
-    input.from ? `From: ${sanitizeHeader(input.from)}` : null,
-    `Subject: ${encodeSubject(input.subject)}`,
+  const to = sanitizeHeader(input.to);
+  const subject = encodeSubject(input.subject || "(no subject)");
+  const body = (input.body || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\n/g, "\r\n");
+
+  const mime = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: 8bit",
+    "Content-Transfer-Encoding: 7bit",
     "",
-    input.body.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"),
-  ].filter((line) => line !== null);
+    body,
+  ].join("\r\n");
 
-  return Buffer.from(lines.join("\r\n"), "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  // Node base64url is URL-safe and strips padding — what Gmail expects.
+  return Buffer.from(mime, "utf8").toString("base64url");
 }
 
 export function getGmailErrorMessage(error: unknown) {
@@ -157,24 +163,42 @@ export function getGmailErrorMessage(error: unknown) {
   const err = error as {
     message?: string;
     code?: number | string;
+    errors?: Array<{ message?: string; reason?: string }>;
     response?: {
       status?: number;
+      statusText?: string;
       data?: {
-        error?: { message?: string; status?: string; code?: number };
+        error?: {
+          message?: string;
+          status?: string;
+          code?: number;
+          errors?: Array<{ message?: string; reason?: string }>;
+        };
         error_description?: string;
       };
     };
   };
 
+  const nested =
+    err.response?.data?.error?.errors?.[0]?.message ||
+    err.response?.data?.error?.errors?.[0]?.reason ||
+    err.errors?.[0]?.message;
+
   const apiMessage =
+    nested ||
     err.response?.data?.error?.message ||
     err.response?.data?.error_description ||
     err.message ||
+    err.response?.statusText ||
     "Gmail draft creation failed.";
 
   const status = err.response?.status ?? err.code;
   if (status === 401 || status === 403) {
     return `${apiMessage} Reconnect Gmail in Settings.`;
+  }
+
+  if (status === 400) {
+    return `Bad Request: ${apiMessage}`;
   }
 
   return apiMessage;
@@ -204,6 +228,7 @@ function sanitizeHeader(value: string) {
 
 function encodeSubject(value: string) {
   const clean = sanitizeHeader(value);
+  // ASCII subjects can stay plain; anything else needs RFC 2047.
   if (/^[\x20-\x7E]*$/.test(clean)) {
     return clean;
   }

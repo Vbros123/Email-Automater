@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, parseJsonError } from "@/lib/api";
-import { createGmailClient } from "@/lib/gmail/client";
+import {
+  assertGmailAccess,
+  createGmailAuth,
+  getGmailErrorMessage,
+  isGmailAuthError,
+  persistGmailTokens,
+} from "@/lib/gmail/client";
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { sendConfirmationSchema } from "@/lib/validators";
 
@@ -13,7 +19,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   if ("error" in auth) return auth.error;
 
   const limit = checkRateLimit(`gmail:send:${auth.user.id}`, {
-    limit: 2,
+    limit: 5,
     windowMs: 60_000,
   });
 
@@ -73,11 +79,32 @@ export async function POST(request: NextRequest, { params }: Params) {
     );
   }
 
-  const gmail = createGmailClient(connection);
-  const results = [];
+  let gmailAuth;
+  try {
+    gmailAuth = createGmailAuth(connection);
+    await assertGmailAccess(gmailAuth.gmail);
+  } catch (error) {
+    return NextResponse.json(
+      { error: getGmailErrorMessage(error) },
+      { status: 401 },
+    );
+  }
+
+  const { gmail, auth: oauthClient } = gmailAuth;
+  const results: Array<{ email: string; status: string; detail?: string }> = [];
+  let stoppedForAuth = false;
 
   for (const recipient of recipients) {
     if (!recipient.gmail_draft_id) {
+      continue;
+    }
+
+    if (stoppedForAuth) {
+      results.push({
+        email: recipient.email,
+        status: "failed",
+        detail: "Skipped after Gmail auth failure.",
+      });
       continue;
     }
 
@@ -107,18 +134,30 @@ export async function POST(request: NextRequest, { params }: Params) {
       });
 
       results.push({ email: recipient.email, status: "sent" });
-    } catch {
+    } catch (error) {
+      const detail = getGmailErrorMessage(error);
+
       await auth.supabase
         .from("campaign_recipients")
         .update({
           status: "failed",
-          error_message: "Gmail send failed.",
+          error_message: detail,
         })
         .eq("id", recipient.id)
         .eq("user_id", auth.user.id);
 
-      results.push({ email: recipient.email, status: "failed" });
+      results.push({ email: recipient.email, status: "failed", detail });
+
+      if (isGmailAuthError(error)) {
+        stoppedForAuth = true;
+      }
     }
+  }
+
+  try {
+    await persistGmailTokens(auth.supabase, auth.user.id, oauthClient);
+  } catch {
+    // best-effort
   }
 
   const sentCount = results.filter((result) => result.status === "sent").length;

@@ -2,9 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUser, parseJsonError } from "@/lib/api";
 import { MAX_CAMPAIGN_RECIPIENTS, toPersonalizationContact } from "@/lib/campaigns";
 import {
-  createGmailClient,
+  assertGmailAccess,
+  createGmailAuth,
   createRawEmail,
   getGmailErrorMessage,
+  isGmailAuthError,
+  persistGmailTokens,
 } from "@/lib/gmail/client";
 import { personalizeTemplate } from "@/lib/personalization";
 import { checkRateLimit } from "@/lib/security/rate-limit";
@@ -20,7 +23,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   if ("error" in auth) return auth.error;
 
   const limit = checkRateLimit(`gmail:drafts:${auth.user.id}`, {
-    limit: 5,
+    limit: 10,
     windowMs: 60_000,
   });
 
@@ -102,25 +105,48 @@ export async function POST(request: NextRequest, { params }: Params) {
 
   const typedTemplate = template as EmailTemplate;
   const typedContacts = contacts as Contact[];
-  const gmail = createGmailClient(connection);
-  const results = [];
+
+  let gmailAuth;
+  try {
+    gmailAuth = createGmailAuth(connection);
+    await assertGmailAccess(gmailAuth.gmail);
+  } catch (error) {
+    const detail = getGmailErrorMessage(error);
+    return NextResponse.json(
+      {
+        error: detail,
+        results: [],
+        draftsCreated: 0,
+        message: `Gmail auth failed: ${detail}`,
+      },
+      { status: 401 },
+    );
+  }
+
+  const { gmail, auth: oauthClient } = gmailAuth;
+  const fromAddress = connection.google_email ?? auth.user.email ?? undefined;
+  const results: Array<{ email: string; status: string; detail?: string }> = [];
+  let stoppedForAuth = false;
 
   for (const contact of typedContacts) {
+    if (stoppedForAuth) {
+      results.push({
+        email: contact.email,
+        status: "failed",
+        detail: "Skipped after Gmail auth failure.",
+      });
+      continue;
+    }
+
+    // Always soft-resolve optional vars — only name/email matter.
     const personalized = personalizeTemplate(
       typedTemplate,
       toPersonalizationContact(contact),
       {
-        allowUnresolved: parsed.data.overrideUnresolvedVariables,
+        allowUnresolved: true,
         unsubscribeFooter: campaign.unsubscribe_footer ?? undefined,
       },
     );
-
-    if (personalized.missingVariables.length && !parsed.data.overrideUnresolvedVariables) {
-      const detail = `Missing variables: ${personalized.missingVariables.join(", ")}`;
-      results.push({ email: contact.email, status: "blocked", detail });
-      await logFailure(auth.supabase, auth.user.id, campaign.id, contact.email, detail);
-      continue;
-    }
 
     try {
       const draft = await gmail.users.drafts.create({
@@ -129,8 +155,9 @@ export async function POST(request: NextRequest, { params }: Params) {
           message: {
             raw: createRawEmail({
               to: contact.email,
-              subject: personalized.subject,
-              body: personalized.body,
+              from: fromAddress,
+              subject: personalized.subject || "(no subject)",
+              body: personalized.body || "",
             }),
           },
         },
@@ -158,17 +185,31 @@ export async function POST(request: NextRequest, { params }: Params) {
         detail: draft.data.id ?? null,
       });
 
-      results.push({ email: contact.email, status: "draft_created", detail: draft.data.id });
+      results.push({
+        email: contact.email,
+        status: "draft_created",
+        detail: draft.data.id ?? undefined,
+      });
     } catch (error) {
       const detail = getGmailErrorMessage(error);
       results.push({ email: contact.email, status: "failed", detail });
       await logFailure(auth.supabase, auth.user.id, campaign.id, contact.email, detail);
+
+      if (isGmailAuthError(error)) {
+        stoppedForAuth = true;
+      }
     }
   }
 
+  try {
+    await persistGmailTokens(auth.supabase, auth.user.id, oauthClient);
+  } catch {
+    // Token persistence is best-effort; draft results still matter.
+  }
+
   const successfulDrafts = results.filter((result) => result.status === "draft_created").length;
-  const blockedCount = results.filter((result) => result.status === "blocked").length;
   const failedCount = results.filter((result) => result.status === "failed").length;
+  const firstFailure = results.find((result) => result.status === "failed")?.detail;
 
   await auth.supabase
     .from("campaigns")
@@ -179,16 +220,13 @@ export async function POST(request: NextRequest, { params }: Params) {
   return NextResponse.json({
     results,
     draftsCreated: successfulDrafts,
-    blockedCount,
     failedCount,
     message:
       successfulDrafts > 0
         ? `Created ${successfulDrafts} Gmail drafts.`
-        : blockedCount > 0
-          ? `No drafts created. ${blockedCount} recipient(s) blocked by missing template variables. Enable "Allow unresolved variables" or fill contact fields / use fallbacks like {{company|your team}}.`
-          : failedCount > 0
-            ? `No drafts created. Gmail rejected ${failedCount} recipient(s). Check the results table and reconnect Gmail if needed.`
-            : "No drafts created.",
+        : firstFailure
+          ? `No drafts created. ${firstFailure}`
+          : "No drafts created.",
   });
 }
 

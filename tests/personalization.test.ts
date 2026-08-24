@@ -25,18 +25,20 @@ describe("template personalization", () => {
     expect(result.missingVariables).toEqual([]);
   });
 
-  it("supports fallback values and reports missing variables", () => {
+  it("soft-resolves optional vars with defaults and does not block", () => {
     const result = personalizeTemplate(
       {
-        subject: "Hello {{company|your team}}",
-        body: "Hi {{firstName}}, meet {{missingValue}}",
+        subject: "Hello {{company}}",
+        body: "Hi {{firstName}}, meet {{missingValue}} from {{senderName}}",
       },
       { firstName: "Ava" },
     );
 
     expect(result.subject).toBe("Hello your team");
     expect(result.body).toContain("Hi Ava");
-    expect(result.missingVariables).toEqual(["missingValue"]);
+    expect(result.body).toContain("from Your Name");
+    // optional/unknown vars are not treated as hard missing
+    expect(result.missingVariables).toEqual([]);
   });
 
   it("does not treat empty optional contact fields as missing", () => {
@@ -51,8 +53,8 @@ describe("template personalization", () => {
       },
     );
 
-    expect(result.subject).toBe("Quick question for ");
-    expect(result.body).toContain("Hi Ava, I saw your work at .");
+    // empty company uses default fallback "your team"
+    expect(result.subject).toBe("Quick question for your team");
     expect(result.missingVariables).toEqual([]);
   });
 

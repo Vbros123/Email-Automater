@@ -13,6 +13,27 @@ const FIELD_ALIASES: Record<string, keyof PersonalizationContact> = {
   notes: "notes",
 };
 
+/** Vars we care about for quality; everything else soft-resolves. */
+const IMPORTANT_VARS = new Set([
+  "firstname",
+  "first_name",
+  "lastname",
+  "last_name",
+  "email",
+]);
+
+const DEFAULT_FALLBACKS: Record<string, string> = {
+  firstname: "there",
+  first_name: "there",
+  lastname: "",
+  last_name: "",
+  company: "your team",
+  role: "",
+  notes: "",
+  sendername: "Your Name",
+  sender_name: "Your Name",
+};
+
 export type PersonalizationResult = {
   subject: string;
   body: string;
@@ -44,15 +65,17 @@ export function personalizeTemplate(
 ): PersonalizationResult {
   const missingVariables = new Set<string>();
   const usedVariables = new Set<string>();
+  // Default: never hard-block drafts. Only track missing important vars for UI.
+  const allowUnresolved = options?.allowUnresolved ?? true;
 
   const replace = (input: string) =>
     input.replace(VARIABLE_REGEX, (raw, variable: string, fallback?: string) => {
       usedVariables.add(variable);
-      const value = readContactValue(contact, variable);
+      const key = variable.trim();
+      const lower = key.toLowerCase();
+      const value = readContactValue(contact, key);
 
-      // Empty string is a resolved value (e.g. contact has no company).
-      // Only treat the variable as missing when it is truly absent.
-      if (value !== undefined) {
+      if (value) {
         return value;
       }
 
@@ -60,8 +83,21 @@ export function personalizeTemplate(
         return fallback.trim();
       }
 
-      missingVariables.add(variable);
-      return options?.allowUnresolved ? raw : "";
+      if (DEFAULT_FALLBACKS[lower] !== undefined) {
+        return DEFAULT_FALLBACKS[lower];
+      }
+
+      // Empty optional contact field that exists → empty string, not missing.
+      if (value === "") {
+        return "";
+      }
+
+      if (IMPORTANT_VARS.has(lower)) {
+        missingVariables.add(variable);
+      }
+
+      // Soft-resolve everything else so drafts still go out.
+      return allowUnresolved ? "" : raw;
     });
 
   const body = [replace(template.body), options?.unsubscribeFooter]
@@ -98,7 +134,6 @@ function readContactValue(
     if (typeof aliased === "string") {
       return aliased.trim();
     }
-    // Known contact fields are always considered present once mapped.
     if (aliasKey in contact) {
       return "";
     }

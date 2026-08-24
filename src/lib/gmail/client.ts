@@ -1,6 +1,7 @@
 import "server-only";
 
-import { google } from "googleapis";
+import { google, type gmail_v1 } from "googleapis";
+import type { OAuth2Client } from "google-auth-library";
 import { env, hasGoogleEnv } from "@/lib/env";
 import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
 
@@ -49,14 +50,20 @@ export async function exchangeCodeForEncryptedTokens(code: string) {
   };
 }
 
-export function createGmailClient(connection: {
+export type GmailConnection = {
   access_token_encrypted: string | null;
   refresh_token_encrypted: string | null;
   expiry_date: string | null;
-}) {
-  const client = createOAuthClient();
+  google_email?: string | null;
+};
 
-  client.setCredentials({
+export function createGmailAuth(connection: GmailConnection): {
+  auth: OAuth2Client;
+  gmail: gmail_v1.Gmail;
+} {
+  const auth = createOAuthClient();
+
+  auth.setCredentials({
     access_token: connection.access_token_encrypted
       ? decryptSecret(connection.access_token_encrypted)
       : undefined,
@@ -68,7 +75,54 @@ export function createGmailClient(connection: {
       : undefined,
   });
 
-  return google.gmail({ version: "v1", auth: client });
+  return {
+    auth,
+    gmail: google.gmail({ version: "v1", auth }),
+  };
+}
+
+/** @deprecated use createGmailAuth */
+export function createGmailClient(connection: GmailConnection) {
+  return createGmailAuth(connection).gmail;
+}
+
+export async function persistGmailTokens(
+  supabase: {
+    from: (table: string) => {
+      update: (values: Record<string, unknown>) => {
+        eq: (column: string, value: string) => Promise<unknown>;
+      };
+    };
+  },
+  userId: string,
+  auth: OAuth2Client,
+) {
+  const credentials = auth.credentials;
+
+  if (!credentials.access_token && !credentials.refresh_token) {
+    return;
+  }
+
+  await supabase
+    .from("gmail_connections")
+    .update({
+      access_token_encrypted: credentials.access_token
+        ? encryptSecret(credentials.access_token)
+        : undefined,
+      refresh_token_encrypted: credentials.refresh_token
+        ? encryptSecret(credentials.refresh_token)
+        : undefined,
+      expiry_date: credentials.expiry_date
+        ? new Date(credentials.expiry_date).toISOString()
+        : undefined,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId);
+}
+
+export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
+  // Lightweight probe so we fail fast on bad tokens instead of 50 times.
+  await gmail.users.getProfile({ userId: "me" });
 }
 
 export function createRawEmail(input: {
@@ -77,18 +131,20 @@ export function createRawEmail(input: {
   subject: string;
   body: string;
 }) {
-  const encodedBody = Buffer.from(input.body, "utf8").toString("base64");
-
-  const headers = [
-    `To: ${input.to}`,
-    input.from ? `From: ${input.from}` : "",
-    `Subject: ${encodeHeader(input.subject)}`,
+  // Gmail expects a full RFC 2822 message, then base64url-encoded.
+  // Keep the body as UTF-8 text; Gmail accepts this for drafts.create.
+  const lines = [
+    `To: ${sanitizeHeader(input.to)}`,
+    input.from ? `From: ${sanitizeHeader(input.from)}` : null,
+    `Subject: ${encodeSubject(input.subject)}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: base64",
-  ].filter(Boolean);
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    input.body.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"),
+  ].filter((line) => line !== null);
 
-  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${encodedBody}`)
+  return Buffer.from(lines.join("\r\n"), "utf8")
     .toString("base64")
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
@@ -102,17 +158,57 @@ export function getGmailErrorMessage(error: unknown) {
 
   const err = error as {
     message?: string;
-    response?: { data?: { error?: { message?: string }; error_description?: string } };
+    code?: number | string;
+    response?: {
+      status?: number;
+      data?: {
+        error?: { message?: string; status?: string; code?: number };
+        error_description?: string;
+      };
+    };
   };
 
-  return (
+  const apiMessage =
     err.response?.data?.error?.message ||
     err.response?.data?.error_description ||
     err.message ||
-    "Gmail draft creation failed."
+    "Gmail draft creation failed.";
+
+  const status = err.response?.status ?? err.code;
+  if (status === 401 || status === 403) {
+    return `${apiMessage} Reconnect Gmail in Settings.`;
+  }
+
+  return apiMessage;
+}
+
+export function isGmailAuthError(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const err = error as {
+    code?: number | string;
+    response?: { status?: number };
+    message?: string;
+  };
+  const status = err.response?.status ?? err.code;
+  if (status === 401 || status === 403) return true;
+  const message = (err.message ?? "").toLowerCase();
+  return (
+    message.includes("invalid_grant") ||
+    message.includes("invalid credentials") ||
+    message.includes("unauthorized") ||
+    message.includes("insufficient permission")
   );
 }
 
-function encodeHeader(value: string) {
-  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+function sanitizeHeader(value: string) {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function encodeSubject(value: string) {
+  const clean = sanitizeHeader(value);
+  // Encode non-ASCII subjects per RFC 2047.
+  if (/^[\x20-\x7E]*$/.test(clean)) {
+    return clean;
+  }
+  return `=?UTF-8?B?${Buffer.from(clean, "utf8").toString("base64")}?=`;
 }

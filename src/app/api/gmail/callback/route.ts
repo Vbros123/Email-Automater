@@ -32,7 +32,8 @@ export async function GET(request: NextRequest) {
 
     const { error } = await auth.supabase.from("gmail_connections").upsert({
       user_id: auth.user.id,
-      google_email: auth.user.email,
+      // Prefer the real Google account email from userinfo.
+      google_email: tokens.googleEmail ?? auth.user.email ?? null,
       access_token_encrypted: tokens.accessTokenEncrypted,
       refresh_token_encrypted:
         tokens.refreshTokenEncrypted ?? existing?.refresh_token_encrypted ?? null,

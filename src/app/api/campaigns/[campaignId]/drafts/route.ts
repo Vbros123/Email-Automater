@@ -4,7 +4,8 @@ import { MAX_CAMPAIGN_RECIPIENTS, toPersonalizationContact } from "@/lib/campaig
 import {
   assertGmailAccess,
   createGmailAuth,
-  createRawEmail,
+  createGmailDraft,
+  getAccessToken,
   getGmailErrorMessage,
   isGmailAuthError,
   persistGmailTokens,
@@ -28,7 +29,7 @@ type DraftResult = {
   draftId?: string | null;
 };
 
-const GMAIL_CONCURRENCY = 5;
+const GMAIL_CONCURRENCY = 3;
 
 async function mapPool<T, R>(
   items: T[],
@@ -139,9 +140,11 @@ export async function POST(request: NextRequest, { params }: Params) {
   const typedContacts = contacts as Contact[];
 
   let gmailAuth;
+  let accessToken: string;
   try {
     gmailAuth = createGmailAuth(connection);
     await assertGmailAccess(gmailAuth.gmail);
+    accessToken = await getAccessToken(gmailAuth.auth);
   } catch (error) {
     const detail = getGmailErrorMessage(error);
     return NextResponse.json(
@@ -155,7 +158,8 @@ export async function POST(request: NextRequest, { params }: Params) {
     );
   }
 
-  const { gmail, auth: oauthClient } = gmailAuth;
+  const { auth: oauthClient } = gmailAuth;
+  const fromAddress = connection.google_email || null;
   let stoppedForAuth = false;
 
   const draftResults = await mapPool(
@@ -181,25 +185,20 @@ export async function POST(request: NextRequest, { params }: Params) {
       );
 
       try {
-        const draft = await gmail.users.drafts.create({
-          userId: "me",
-          requestBody: {
-            message: {
-              raw: createRawEmail({
-                to: contact.email,
-                subject: personalized.subject || "(no subject)",
-                body: personalized.body || "",
-              }),
-            },
-          },
+        const draft = await createGmailDraft({
+          accessToken,
+          to: contact.email,
+          from: fromAddress,
+          subject: personalized.subject || "(no subject)",
+          body: personalized.body || "",
         });
 
         return {
           email: contact.email,
           contactId: contact.id,
           status: "draft_created",
-          detail: draft.data.id ?? undefined,
-          draftId: draft.data.id ?? null,
+          detail: draft.id ?? undefined,
+          draftId: draft.id ?? null,
         };
       } catch (error) {
         if (isGmailAuthError(error)) {
@@ -219,7 +218,6 @@ export async function POST(request: NextRequest, { params }: Params) {
   const successes = draftResults.filter((result) => result.status === "draft_created");
   const failures = draftResults.filter((result) => result.status === "failed");
 
-  // Batch DB writes instead of 2 queries per recipient.
   if (successes.length) {
     await auth.supabase.from("campaign_recipients").upsert(
       successes.map((result) => ({

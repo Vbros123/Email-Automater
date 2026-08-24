@@ -5,7 +5,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { env, hasGoogleEnv } from "@/lib/env";
 import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
 
-export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose"];
+export const GMAIL_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.compose",
+  "https://www.googleapis.com/auth/userinfo.email",
+];
 
 export function createOAuthClient() {
   if (!hasGoogleEnv()) {
@@ -19,7 +22,6 @@ export function createOAuthClient() {
   );
 }
 
-/** Use the OAuth2 type from googleapis itself to avoid duplicate google-auth-library type conflicts. */
 type GoogleOAuthClient = ReturnType<typeof createOAuthClient>;
 
 export function getGoogleAuthUrl(state: string) {
@@ -41,6 +43,18 @@ export async function exchangeCodeForEncryptedTokens(code: string) {
     throw new Error("Google did not return usable Gmail tokens.");
   }
 
+  client.setCredentials(tokens);
+
+  // Resolve the real Gmail address (not the app login email).
+  let googleEmail: string | null = null;
+  try {
+    const oauth2 = google.oauth2({ version: "v2", auth: client });
+    const profile = await oauth2.userinfo.get();
+    googleEmail = profile.data.email ?? null;
+  } catch {
+    googleEmail = null;
+  }
+
   return {
     accessTokenEncrypted: tokens.access_token
       ? encryptSecret(tokens.access_token)
@@ -50,6 +64,7 @@ export async function exchangeCodeForEncryptedTokens(code: string) {
       : null,
     expiryDate: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
     scope: tokens.scope ?? GMAIL_SCOPES.join(" "),
+    googleEmail,
   };
 }
 
@@ -84,7 +99,6 @@ export function createGmailAuth(connection: GmailConnection): {
   };
 }
 
-/** @deprecated use createGmailAuth */
 export function createGmailClient(connection: GmailConnection) {
   return createGmailAuth(connection).gmail;
 }
@@ -123,32 +137,124 @@ export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
   await gmail.users.drafts.list({ userId: "me", maxResults: 1 });
 }
 
+export async function getAccessToken(auth: GoogleOAuthClient) {
+  const tokenResponse = await auth.getAccessToken();
+  const token =
+    typeof tokenResponse === "string"
+      ? tokenResponse
+      : tokenResponse?.token ?? auth.credentials.access_token;
+
+  if (!token) {
+    throw new Error("Could not obtain a Gmail access token. Reconnect Gmail in Settings.");
+  }
+
+  return token;
+}
+
 /**
- * RFC 2822 message → base64url, matching Google's Node samples.
- * No From header (Gmail sets the connected account).
- * No 7bit CTE (breaks on non-ASCII body text).
+ * Create a Gmail draft via REST so we control the payload and get full error bodies.
  */
+export async function createGmailDraft(input: {
+  accessToken: string;
+  to: string;
+  from?: string | null;
+  subject: string;
+  body: string;
+}) {
+  const raw = createRawEmail({
+    to: input.to,
+    from: input.from,
+    subject: input.subject,
+    body: input.body,
+  });
+
+  const response = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message: { raw },
+      }),
+    },
+  );
+
+  const text = await response.text();
+  let json: {
+    id?: string;
+    message?: { id?: string };
+    error?: {
+      message?: string;
+      status?: string;
+      code?: number;
+      errors?: Array<{ message?: string; reason?: string }>;
+    };
+  } = {};
+
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { error: { message: text || response.statusText } };
+  }
+
+  if (!response.ok) {
+    const detail =
+      json.error?.errors?.[0]?.message ||
+      json.error?.message ||
+      text ||
+      response.statusText ||
+      "Gmail draft creation failed.";
+
+    const error = new Error(detail) as Error & {
+      code?: number;
+      response?: { status: number; data: unknown };
+    };
+    error.code = response.status;
+    error.response = { status: response.status, data: json };
+    throw error;
+  }
+
+  return {
+    id: json.id ?? json.message?.id ?? null,
+  };
+}
+
 export function createRawEmail(input: {
   to: string;
+  from?: string | null;
   subject: string;
   body: string;
 }) {
   const to = sanitizeHeader(input.to);
-  if (!to || !to.includes("@")) {
+  if (!to || !/^[^
+@]+@[^
+@]+
+[^
+@]+$/.test(to) === false && !to.includes("@")) {
+    // keep simple check
+  }
+  if (!to.includes("@")) {
     throw new Error(`Invalid recipient address: ${input.to || "(empty)"}`);
   }
 
   const subject = encodeSubject(input.subject || "(no subject)");
   const body = (input.body || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const from = input.from ? sanitizeHeader(input.from) : null;
 
-  // Official samples use \n separators and minimal headers.
-  const message = [
+  const lines = [
     `To: ${to}`,
+    from ? `From: ${from}` : null,
     `Subject: ${subject}`,
-    `Content-Type: text/plain; charset="UTF-8"`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
     "",
     body,
-  ].join("\n");
+  ].filter((line): line is string => line !== null);
+
+  const message = lines.join("\r\n");
 
   return Buffer.from(message, "utf8")
     .toString("base64")
@@ -207,14 +313,14 @@ export function getGmailErrorMessage(error: unknown) {
       "Gmail draft creation failed.";
   }
 
-  // Strip duplicate "Bad Request" noise from googleapis wrapper messages.
   apiMessage = apiMessage
-    .replace(/^Request failed with status code 400\s*/i, "")
+    .replace(/^Request failed with status code \d+\s*/i, "")
     .replace(/^Bad Request:?\s*/i, "")
     .trim();
 
-  if (!apiMessage) {
-    apiMessage = "Invalid email payload (check recipient addresses and template content).";
+  if (!apiMessage || /^bad request$/i.test(apiMessage)) {
+    apiMessage =
+      "Gmail rejected the message. Reconnect Gmail in Settings, then try again with 1–2 contacts first.";
   }
 
   const status = err.response?.status ?? err.code;

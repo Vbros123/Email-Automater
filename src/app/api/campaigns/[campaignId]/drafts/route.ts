@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, parseJsonError } from "@/lib/api";
 import { MAX_CAMPAIGN_RECIPIENTS, toPersonalizationContact } from "@/lib/campaigns";
-import { createGmailClient, createRawEmail } from "@/lib/gmail/client";
+import {
+  createGmailClient,
+  createRawEmail,
+  getGmailErrorMessage,
+} from "@/lib/gmail/client";
 import { personalizeTemplate } from "@/lib/personalization";
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { draftCreateSchema } from "@/lib/validators";
@@ -89,6 +93,13 @@ export async function POST(request: NextRequest, { params }: Params) {
     );
   }
 
+  if (!connection.refresh_token_encrypted && !connection.access_token_encrypted) {
+    return NextResponse.json(
+      { error: "Gmail connection is missing tokens. Reconnect Gmail in Settings." },
+      { status: 400 },
+    );
+  }
+
   const typedTemplate = template as EmailTemplate;
   const typedContacts = contacts as Contact[];
   const gmail = createGmailClient(connection);
@@ -148,14 +159,16 @@ export async function POST(request: NextRequest, { params }: Params) {
       });
 
       results.push({ email: contact.email, status: "draft_created", detail: draft.data.id });
-    } catch {
-      const detail = "Gmail draft creation failed.";
+    } catch (error) {
+      const detail = getGmailErrorMessage(error);
       results.push({ email: contact.email, status: "failed", detail });
       await logFailure(auth.supabase, auth.user.id, campaign.id, contact.email, detail);
     }
   }
 
   const successfulDrafts = results.filter((result) => result.status === "draft_created").length;
+  const blockedCount = results.filter((result) => result.status === "blocked").length;
+  const failedCount = results.filter((result) => result.status === "failed").length;
 
   await auth.supabase
     .from("campaigns")
@@ -163,7 +176,20 @@ export async function POST(request: NextRequest, { params }: Params) {
     .eq("id", campaign.id)
     .eq("user_id", auth.user.id);
 
-  return NextResponse.json({ results, draftsCreated: successfulDrafts });
+  return NextResponse.json({
+    results,
+    draftsCreated: successfulDrafts,
+    blockedCount,
+    failedCount,
+    message:
+      successfulDrafts > 0
+        ? `Created ${successfulDrafts} Gmail drafts.`
+        : blockedCount > 0
+          ? `No drafts created. ${blockedCount} recipient(s) blocked by missing template variables. Enable "Allow unresolved variables" or fill contact fields / use fallbacks like {{company|your team}}.`
+          : failedCount > 0
+            ? `No drafts created. Gmail rejected ${failedCount} recipient(s). Check the results table and reconnect Gmail if needed.`
+            : "No drafts created.",
+  });
 }
 
 async function logFailure(

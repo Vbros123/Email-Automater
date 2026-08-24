@@ -2,6 +2,17 @@ import type { PersonalizationContact } from "@/lib/types";
 
 const VARIABLE_REGEX = /{{\s*([a-zA-Z0-9_.]+)(?:\s*\|\s*([^}]+?))?\s*}}/g;
 
+const FIELD_ALIASES: Record<string, keyof PersonalizationContact> = {
+  firstname: "firstName",
+  first_name: "firstName",
+  lastname: "lastName",
+  last_name: "lastName",
+  email: "email",
+  company: "company",
+  role: "role",
+  notes: "notes",
+};
+
 export type PersonalizationResult = {
   subject: string;
   body: string;
@@ -39,7 +50,9 @@ export function personalizeTemplate(
       usedVariables.add(variable);
       const value = readContactValue(contact, variable);
 
-      if (value) {
+      // Empty string is a resolved value (e.g. contact has no company).
+      // Only treat the variable as missing when it is truly absent.
+      if (value !== undefined) {
         return value;
       }
 
@@ -65,14 +78,36 @@ export function personalizeTemplate(
   };
 }
 
-function readContactValue(contact: PersonalizationContact, path: string) {
+function readContactValue(
+  contact: PersonalizationContact,
+  path: string,
+): string | undefined {
   const normalizedPath = path.trim();
 
-  if (normalizedPath.startsWith("customFields.")) {
-    const key = normalizedPath.replace("customFields.", "");
-    return contact.customFields?.[key]?.trim() ?? "";
+  if (normalizedPath.toLowerCase().startsWith("customfields.")) {
+    const key = normalizedPath.slice(normalizedPath.indexOf(".") + 1);
+    if (!contact.customFields || !(key in contact.customFields)) {
+      return undefined;
+    }
+    return contact.customFields[key]?.trim() ?? "";
   }
 
-  const value = contact[normalizedPath as keyof PersonalizationContact];
-  return typeof value === "string" ? value.trim() : "";
+  const aliasKey = FIELD_ALIASES[normalizedPath.toLowerCase()];
+  if (aliasKey) {
+    const aliased = contact[aliasKey];
+    if (typeof aliased === "string") {
+      return aliased.trim();
+    }
+    // Known contact fields are always considered present once mapped.
+    if (aliasKey in contact) {
+      return "";
+    }
+  }
+
+  const direct = contact[normalizedPath as keyof PersonalizationContact];
+  if (typeof direct === "string") {
+    return direct.trim();
+  }
+
+  return undefined;
 }

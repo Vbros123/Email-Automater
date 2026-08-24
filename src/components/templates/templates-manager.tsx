@@ -42,7 +42,7 @@ const emptyDraft = {
   id: "",
   name: "",
   subject: "Quick question for {{company|your team}}",
-  body: "Hi {{firstName|there}},\n\nI saw your work at {{company}} and wanted to reach out with a short note.\n\nBest,\n{{senderName|Your Name}}",
+  body: "Hi {{firstName|there}},\n\nI saw your work at {{company|your company}} and wanted to reach out with a short note.\n\nBest,\n{{senderName|Your Name}}",
 };
 
 export function TemplatesManager({

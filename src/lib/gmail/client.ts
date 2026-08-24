@@ -77,20 +77,40 @@ export function createRawEmail(input: {
   subject: string;
   body: string;
 }) {
+  const encodedBody = Buffer.from(input.body, "utf8").toString("base64");
+
   const headers = [
     `To: ${input.to}`,
     input.from ? `From: ${input.from}` : "",
     `Subject: ${encodeHeader(input.subject)}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: 7bit",
+    "Content-Transfer-Encoding: base64",
   ].filter(Boolean);
 
-  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${input.body}`)
+  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${encodedBody}`)
     .toString("base64")
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
+}
+
+export function getGmailErrorMessage(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return "Gmail draft creation failed.";
+  }
+
+  const err = error as {
+    message?: string;
+    response?: { data?: { error?: { message?: string }; error_description?: string } };
+  };
+
+  return (
+    err.response?.data?.error?.message ||
+    err.response?.data?.error_description ||
+    err.message ||
+    "Gmail draft creation failed."
+  );
 }
 
 function encodeHeader(value: string) {

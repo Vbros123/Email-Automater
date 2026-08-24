@@ -39,6 +39,41 @@ describe("template personalization", () => {
     expect(result.missingVariables).toEqual(["missingValue"]);
   });
 
+  it("does not treat empty optional contact fields as missing", () => {
+    const result = personalizeTemplate(
+      {
+        subject: "Quick question for {{company}}",
+        body: "Hi {{firstName}}, I saw your work at {{company}}.",
+      },
+      {
+        firstName: "Ava",
+        company: "",
+      },
+    );
+
+    expect(result.subject).toBe("Quick question for ");
+    expect(result.body).toContain("Hi Ava, I saw your work at .");
+    expect(result.missingVariables).toEqual([]);
+  });
+
+  it("supports snake_case variable aliases", () => {
+    const result = personalizeTemplate(
+      {
+        subject: "For {{first_name}}",
+        body: "Hello {{last_name}} at {{company}}",
+      },
+      {
+        firstName: "Ava",
+        lastName: "Chen",
+        company: "Northstar Labs",
+      },
+    );
+
+    expect(result.subject).toBe("For Ava");
+    expect(result.body).toBe("Hello Chen at Northstar Labs");
+    expect(result.missingVariables).toEqual([]);
+  });
+
   it("detects variables across subject and body", () => {
     expect(
       detectTemplateVariables("For {{company}}", "Hi {{firstName}} {{company}}"),

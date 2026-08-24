@@ -172,7 +172,16 @@ export function CampaignBuilder({
       }
 
       setResults(json.results ?? []);
-      toast.success(`Created ${json.draftsCreated} Gmail drafts.`);
+
+      const created = json.draftsCreated ?? 0;
+      if (created > 0) {
+        toast.success(json.message ?? `Created ${created} Gmail drafts.`);
+      } else {
+        toast.error(
+          json.message ??
+            "Created 0 drafts. Check missing variables or Gmail connection.",
+        );
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not create drafts.");
     } finally {
@@ -369,7 +378,8 @@ export function CampaignBuilder({
               <AlertTitle>Missing variables detected</AlertTitle>
               <AlertDescription>
                 Draft creation will skip recipients with unresolved variables
-                unless you explicitly override.
+                unless you explicitly override. Use fallbacks like{" "}
+                {"{{company|your team}}"} or fill contact fields.
               </AlertDescription>
             </Alert>
           )}
@@ -444,7 +454,7 @@ export function CampaignBuilder({
                             {result.status}
                           </Badge>
                         </TableCell>
-                        <TableCell className="max-w-[240px] truncate">
+                        <TableCell className="max-w-[280px] whitespace-normal break-words">
                           {result.detail ?? "None"}
                         </TableCell>
                       </TableRow>

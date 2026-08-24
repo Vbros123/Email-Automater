@@ -121,8 +121,8 @@ export async function persistGmailTokens(
 }
 
 export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
-  // Lightweight probe so we fail fast on bad tokens instead of 50 times.
-  await gmail.users.getProfile({ userId: "me" });
+  // Use drafts.list — allowed under gmail.compose (unlike users.getProfile).
+  await gmail.users.drafts.list({ userId: "me", maxResults: 1 });
 }
 
 export function createRawEmail(input: {
@@ -132,7 +132,6 @@ export function createRawEmail(input: {
   body: string;
 }) {
   // Gmail expects a full RFC 2822 message, then base64url-encoded.
-  // Keep the body as UTF-8 text; Gmail accepts this for drafts.create.
   const lines = [
     `To: ${sanitizeHeader(input.to)}`,
     input.from ? `From: ${sanitizeHeader(input.from)}` : null,
@@ -206,7 +205,6 @@ function sanitizeHeader(value: string) {
 
 function encodeSubject(value: string) {
   const clean = sanitizeHeader(value);
-  // Encode non-ASCII subjects per RFC 2047.
   if (/^[\x20-\x7E]*$/.test(clean)) {
     return clean;
   }

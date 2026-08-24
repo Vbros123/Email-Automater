@@ -1,5 +1,10 @@
 import Link from "next/link";
-import { CheckCircle2Icon, MailCheckIcon, PlugZapIcon } from "lucide-react";
+import {
+  CheckCircle2Icon,
+  MailCheckIcon,
+  PlugZapIcon,
+  UnplugIcon,
+} from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
@@ -44,7 +49,17 @@ export default async function SettingsPage({
           <CheckCircle2Icon />
           <AlertTitle>Gmail connected</AlertTitle>
           <AlertDescription>
-            EmailFlow AI can now create Gmail drafts for reviewed campaigns.
+            Fresh tokens saved. You can create Gmail drafts from Campaigns.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {params.gmail === "disconnected" && (
+        <Alert>
+          <UnplugIcon />
+          <AlertTitle>Gmail disconnected</AlertTitle>
+          <AlertDescription>
+            Tokens cleared. Click Connect Gmail to authorize again.
           </AlertDescription>
         </Alert>
       )}
@@ -54,8 +69,28 @@ export default async function SettingsPage({
           <PlugZapIcon />
           <AlertTitle>Gmail connection failed</AlertTitle>
           <AlertDescription>
-            The OAuth callback could not be completed. Check Google OAuth
-            credentials and redirect URI.
+            Check GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI,
+            and that Gmail API is enabled in Google Cloud Console.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {params.gmail === "no_refresh_token" && (
+        <Alert>
+          <PlugZapIcon />
+          <AlertTitle>Google did not return a refresh token</AlertTitle>
+          <AlertDescription>
+            Open{" "}
+            <a
+              className="underline"
+              href="https://myaccount.google.com/permissions"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Google Account → Third-party access
+            </a>
+            , remove EmailFlow AI / your app, then click Connect Gmail again and
+            accept all permissions.
           </AlertDescription>
         </Alert>
       )}
@@ -81,13 +116,31 @@ export default async function SettingsPage({
                 {connection ? "Connected" : "Not connected"}
               </Badge>
             </div>
-            <Link
-              href="/api/gmail/connect"
-              className={buttonVariants({ variant: "outline" })}
-            >
-              <MailCheckIcon data-icon="inline-start" />
-              Connect Gmail
-            </Link>
+
+            <div className="flex flex-wrap gap-2">
+              <Link
+                href="/api/gmail/connect"
+                className={buttonVariants({ variant: "outline" })}
+              >
+                <MailCheckIcon data-icon="inline-start" />
+                {connection ? "Reconnect Gmail" : "Connect Gmail"}
+              </Link>
+              {connection ? (
+                <Link
+                  href="/api/gmail/disconnect"
+                  className={buttonVariants({ variant: "secondary" })}
+                >
+                  <UnplugIcon data-icon="inline-start" />
+                  Disconnect
+                </Link>
+              ) : null}
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              If drafts fail with invalid_grant: Disconnect here, remove the app
+              at myaccount.google.com/permissions, then Connect again. Apps in
+              Google Cloud &quot;Testing&quot; mode expire refresh tokens after 7 days.
+            </p>
           </CardContent>
         </Card>
 
@@ -97,7 +150,10 @@ export default async function SettingsPage({
           </CardHeader>
           <CardContent className="flex flex-col gap-3 text-sm">
             <StatusRow label="Google OAuth configured" enabled={googleReady} />
-            <StatusRow label="Token encryption key configured" enabled={encryptionReady} />
+            <StatusRow
+              label="Token encryption key configured"
+              enabled={encryptionReady}
+            />
             <StatusRow label="Default behavior creates drafts" enabled />
             <StatusRow label="Sending requires permission confirmation" enabled />
             <div className="rounded-lg border bg-muted/30 p-3">

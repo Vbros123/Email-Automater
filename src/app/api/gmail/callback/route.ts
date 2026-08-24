@@ -24,19 +24,27 @@ export async function GET(request: NextRequest) {
   try {
     const tokens = await exchangeCodeForEncryptedTokens(code);
 
-    const { data: existing } = await auth.supabase
-      .from("gmail_connections")
-      .select("refresh_token_encrypted")
-      .eq("user_id", auth.user.id)
-      .maybeSingle();
+    // A refresh token is required. Never keep a stale one from a previous connect.
+    if (!tokens.refreshTokenEncrypted) {
+      return NextResponse.redirect(
+        `${env.NEXT_PUBLIC_APP_URL}/dashboard/settings?gmail=no_refresh_token`,
+      );
+    }
 
-    const { error } = await auth.supabase.from("gmail_connections").upsert({
+    if (!tokens.accessTokenEncrypted) {
+      return NextResponse.redirect(
+        `${env.NEXT_PUBLIC_APP_URL}/dashboard/settings?gmail=failed`,
+      );
+    }
+
+    // Replace any previous connection entirely so dead tokens cannot linger.
+    await auth.supabase.from("gmail_connections").delete().eq("user_id", auth.user.id);
+
+    const { error } = await auth.supabase.from("gmail_connections").insert({
       user_id: auth.user.id,
-      // Prefer the real Google account email from userinfo.
       google_email: tokens.googleEmail ?? auth.user.email ?? null,
       access_token_encrypted: tokens.accessTokenEncrypted,
-      refresh_token_encrypted:
-        tokens.refreshTokenEncrypted ?? existing?.refresh_token_encrypted ?? null,
+      refresh_token_encrypted: tokens.refreshTokenEncrypted,
       expiry_date: tokens.expiryDate,
       scope: tokens.scope,
       connected_at: new Date().toISOString(),

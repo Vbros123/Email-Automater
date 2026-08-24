@@ -30,6 +30,7 @@ export function getGoogleAuthUrl(state: string) {
   return client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
+    include_granted_scopes: true,
     scope: GMAIL_SCOPES,
     state,
   });
@@ -39,8 +40,8 @@ export async function exchangeCodeForEncryptedTokens(code: string) {
   const client = createOAuthClient();
   const { tokens } = await client.getToken(code);
 
-  if (!tokens.refresh_token && !tokens.access_token) {
-    throw new Error("Google did not return usable Gmail tokens.");
+  if (!tokens.access_token) {
+    throw new Error("Google did not return an access token.");
   }
 
   client.setCredentials(tokens);
@@ -55,9 +56,7 @@ export async function exchangeCodeForEncryptedTokens(code: string) {
   }
 
   return {
-    accessTokenEncrypted: tokens.access_token
-      ? encryptSecret(tokens.access_token)
-      : null,
+    accessTokenEncrypted: encryptSecret(tokens.access_token),
     refreshTokenEncrypted: tokens.refresh_token
       ? encryptSecret(tokens.refresh_token)
       : null,
@@ -80,13 +79,29 @@ export function createGmailAuth(connection: GmailConnection): {
 } {
   const auth = createOAuthClient();
 
-  auth.setCredentials({
-    access_token: connection.access_token_encrypted
+  let accessToken: string | undefined;
+  let refreshToken: string | undefined;
+
+  try {
+    accessToken = connection.access_token_encrypted
       ? decryptSecret(connection.access_token_encrypted)
-      : undefined,
-    refresh_token: connection.refresh_token_encrypted
+      : undefined;
+    refreshToken = connection.refresh_token_encrypted
       ? decryptSecret(connection.refresh_token_encrypted)
-      : undefined,
+      : undefined;
+  } catch {
+    throw new Error(
+      "Could not decrypt Gmail tokens. Check ENCRYPTION_KEY is unchanged, then reconnect Gmail.",
+    );
+  }
+
+  if (!refreshToken && !accessToken) {
+    throw new Error("Gmail connection has no tokens. Reconnect Gmail in Settings.");
+  }
+
+  auth.setCredentials({
+    access_token: accessToken,
+    refresh_token: refreshToken,
     expiry_date: connection.expiry_date
       ? new Date(connection.expiry_date).getTime()
       : undefined,
@@ -132,14 +147,17 @@ export async function persistGmailTokens(
   await supabase.from("gmail_connections").update(payload).eq("user_id", userId);
 }
 
+export async function clearGmailConnection(
+  supabase: SupabaseClient,
+  userId: string,
+) {
+  await supabase.from("gmail_connections").delete().eq("user_id", userId);
+}
+
 export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
   await gmail.users.drafts.list({ userId: "me", maxResults: 1 });
 }
 
-/**
- * Official Google Node-sample style encoding.
- * https://developers.google.com/gmail/api/guides/sending
- */
 export function createRawEmail(input: {
   to: string;
   from?: string | null;
@@ -157,7 +175,6 @@ export function createRawEmail(input: {
     ? String(input.from).replace(/[\r\n]/g, "").trim()
     : "";
 
-  // Exact pattern used in Google's Node.js samples.
   const str = [
     'Content-Type: text/plain; charset="UTF-8"\n',
     "MIME-Version: 1.0\n",
@@ -168,7 +185,6 @@ export function createRawEmail(input: {
     body,
   ].join("");
 
-  // Google sample keeps padding (=). Only swap +/ for URL safety.
   return Buffer.from(str)
     .toString("base64")
     .replace(/\+/g, "-")
@@ -205,7 +221,6 @@ export async function createGmailDraft(input: {
 
 export function getGmailErrorMessage(error: unknown) {
   if (error instanceof Error && !("response" in error) && error.message) {
-    // Local validation errors (invalid recipient, etc.)
     if (!error.message.toLowerCase().includes("request failed")) {
       return error.message;
     }
@@ -239,7 +254,17 @@ export function getGmailErrorMessage(error: unknown) {
     | string
     | undefined;
 
-  // Prefer the structured Gmail error, then fall back to full JSON.
+  const blob = JSON.stringify(data ?? err.message ?? "").toLowerCase();
+
+  if (blob.includes("invalid_grant")) {
+    return (
+      "invalid_grant: Gmail tokens are expired or revoked. " +
+      "Disconnect Gmail, remove EmailFlow AI access at myaccount.google.com/permissions, " +
+      "then Connect Gmail again. " +
+      "If your Google Cloud app is in Testing mode, refresh tokens expire after 7 days."
+    );
+  }
+
   if (data && typeof data === "object" && data.error) {
     const parts = [
       data.error.message,
@@ -283,12 +308,12 @@ export function isGmailAuthError(error: unknown) {
   if (!error || typeof error !== "object") return false;
   const err = error as {
     code?: number | string;
-    response?: { status?: number; data?: { error?: { status?: string; message?: string } } };
+    response?: { status?: number; data?: unknown };
     message?: string;
   };
   const status = err.response?.status ?? err.code;
   if (status === 401 || status === 403) return true;
-  const message = `${err.message ?? ""} ${err.response?.data?.error?.message ?? ""}`.toLowerCase();
+  const message = `${err.message ?? ""} ${JSON.stringify(err.response?.data ?? "")}`.toLowerCase();
   return (
     message.includes("invalid_grant") ||
     message.includes("invalid credentials") ||

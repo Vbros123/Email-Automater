@@ -3,6 +3,7 @@ import { requireUser, parseJsonError } from "@/lib/api";
 import { MAX_CAMPAIGN_RECIPIENTS, toPersonalizationContact } from "@/lib/campaigns";
 import {
   assertGmailAccess,
+  clearGmailConnection,
   createGmailAuth,
   createGmailDraft,
   getGmailErrorMessage,
@@ -106,10 +107,17 @@ export async function POST(request: NextRequest, { params }: Params) {
     );
   }
 
-  if (!connection.refresh_token_encrypted && !connection.access_token_encrypted) {
+  if (!connection.refresh_token_encrypted) {
+    await clearGmailConnection(auth.supabase, auth.user.id);
     return NextResponse.json(
-      { error: "Gmail connection is missing tokens. Reconnect Gmail in Settings." },
-      { status: 400 },
+      {
+        error:
+          "Gmail connection is missing a refresh token. Disconnect, then Connect Gmail again.",
+        results: [],
+        draftsCreated: 0,
+        message: "Reconnect Gmail — a fresh refresh token is required.",
+      },
+      { status: 401 },
     );
   }
 
@@ -122,19 +130,28 @@ export async function POST(request: NextRequest, { params }: Params) {
     await assertGmailAccess(gmailAuth.gmail);
   } catch (error) {
     const detail = getGmailErrorMessage(error);
+
+    // Dead tokens — wipe so the UI stops saying "Connected".
+    if (isGmailAuthError(error) || detail.toLowerCase().includes("invalid_grant")) {
+      try {
+        await clearGmailConnection(auth.supabase, auth.user.id);
+      } catch {
+        // ignore
+      }
+    }
+
     return NextResponse.json(
       {
         error: detail,
         results: [],
         draftsCreated: 0,
-        message: `Gmail auth failed: ${detail}. Reconnect Gmail in Settings. Also confirm Gmail API is enabled in Google Cloud Console for this OAuth project.`,
+        message: detail,
       },
       { status: 401 },
     );
   }
 
   const { gmail, auth: oauthClient } = gmailAuth;
-  // Only use From when we have a real Google address from OAuth userinfo.
   const fromAddress =
     connection.google_email && connection.google_email.includes("@")
       ? connection.google_email
@@ -143,7 +160,6 @@ export async function POST(request: NextRequest, { params }: Params) {
   const draftResults: DraftResult[] = [];
   let stoppedForAuth = false;
 
-  // Sequential — more reliable than concurrent for Gmail token refresh.
   for (const contact of typedContacts) {
     if (stoppedForAuth) {
       draftResults.push({
@@ -191,6 +207,11 @@ export async function POST(request: NextRequest, { params }: Params) {
 
       if (isGmailAuthError(error)) {
         stoppedForAuth = true;
+        try {
+          await clearGmailConnection(auth.supabase, auth.user.id);
+        } catch {
+          // ignore
+        }
       }
     }
   }

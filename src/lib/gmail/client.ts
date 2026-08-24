@@ -2,6 +2,7 @@ import "server-only";
 
 import { google, type gmail_v1 } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { env, hasGoogleEnv } from "@/lib/env";
 import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
 
@@ -87,13 +88,7 @@ export function createGmailClient(connection: GmailConnection) {
 }
 
 export async function persistGmailTokens(
-  supabase: {
-    from: (table: string) => {
-      update: (values: Record<string, unknown>) => {
-        eq: (column: string, value: string) => Promise<unknown>;
-      };
-    };
-  },
+  supabase: SupabaseClient,
   userId: string,
   auth: OAuth2Client,
 ) {
@@ -103,21 +98,23 @@ export async function persistGmailTokens(
     return;
   }
 
-  await supabase
-    .from("gmail_connections")
-    .update({
-      access_token_encrypted: credentials.access_token
-        ? encryptSecret(credentials.access_token)
-        : undefined,
-      refresh_token_encrypted: credentials.refresh_token
-        ? encryptSecret(credentials.refresh_token)
-        : undefined,
-      expiry_date: credentials.expiry_date
-        ? new Date(credentials.expiry_date).toISOString()
-        : undefined,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", userId);
+  const payload: Record<string, string> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (credentials.access_token) {
+    payload.access_token_encrypted = encryptSecret(credentials.access_token);
+  }
+
+  if (credentials.refresh_token) {
+    payload.refresh_token_encrypted = encryptSecret(credentials.refresh_token);
+  }
+
+  if (credentials.expiry_date) {
+    payload.expiry_date = new Date(credentials.expiry_date).toISOString();
+  }
+
+  await supabase.from("gmail_connections").update(payload).eq("user_id", userId);
 }
 
 export async function assertGmailAccess(gmail: gmail_v1.Gmail) {

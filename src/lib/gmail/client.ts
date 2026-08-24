@@ -45,7 +45,6 @@ export async function exchangeCodeForEncryptedTokens(code: string) {
 
   client.setCredentials(tokens);
 
-  // Resolve the real Gmail address (not the app login email).
   let googleEmail: string | null = null;
   try {
     const oauth2 = google.oauth2({ version: "v2", auth: client });
@@ -137,25 +136,47 @@ export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
   await gmail.users.drafts.list({ userId: "me", maxResults: 1 });
 }
 
-export async function getAccessToken(auth: GoogleOAuthClient) {
-  const tokenResponse = await auth.getAccessToken();
-  const token =
-    typeof tokenResponse === "string"
-      ? tokenResponse
-      : tokenResponse?.token ?? auth.credentials.access_token;
-
-  if (!token) {
-    throw new Error("Could not obtain a Gmail access token. Reconnect Gmail in Settings.");
+/**
+ * Official Google Node-sample style encoding.
+ * https://developers.google.com/gmail/api/guides/sending
+ */
+export function createRawEmail(input: {
+  to: string;
+  from?: string | null;
+  subject: string;
+  body: string;
+}) {
+  const to = String(input.to || "").replace(/[\r\n]/g, "").trim();
+  if (!to.includes("@")) {
+    throw new Error(`Invalid recipient: ${input.to || "(empty)"}`);
   }
 
-  return token;
+  const subject = encodeSubject(String(input.subject || "(no subject)"));
+  const body = String(input.body || "");
+  const from = input.from
+    ? String(input.from).replace(/[\r\n]/g, "").trim()
+    : "";
+
+  // Exact pattern used in Google's Node.js samples.
+  const str = [
+    'Content-Type: text/plain; charset="UTF-8"\n',
+    "MIME-Version: 1.0\n",
+    "Content-Transfer-Encoding: 7bit\n",
+    from ? `From: ${from}\n` : "",
+    `to: ${to}\n`,
+    `subject: ${subject}\n\n`,
+    body,
+  ].join("");
+
+  // Google sample keeps padding (=). Only swap +/ for URL safety.
+  return Buffer.from(str)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
 
-/**
- * Create a Gmail draft via REST so we control the payload and get full error bodies.
- */
 export async function createGmailDraft(input: {
-  accessToken: string;
+  gmail: gmail_v1.Gmail;
   to: string;
   from?: string | null;
   subject: string;
@@ -168,95 +189,28 @@ export async function createGmailDraft(input: {
     body: input.body,
   });
 
-  const response = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.accessToken}`,
-        "Content-Type": "application/json",
+  const res = await input.gmail.users.drafts.create({
+    userId: "me",
+    requestBody: {
+      message: {
+        raw,
       },
-      body: JSON.stringify({
-        message: { raw },
-      }),
     },
-  );
-
-  const text = await response.text();
-  let json: {
-    id?: string;
-    message?: { id?: string };
-    error?: {
-      message?: string;
-      status?: string;
-      code?: number;
-      errors?: Array<{ message?: string; reason?: string }>;
-    };
-  } = {};
-
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { error: { message: text || response.statusText } };
-  }
-
-  if (!response.ok) {
-    const detail =
-      json.error?.errors?.[0]?.message ||
-      json.error?.message ||
-      text ||
-      response.statusText ||
-      "Gmail draft creation failed.";
-
-    const error = new Error(detail) as Error & {
-      code?: number;
-      response?: { status: number; data: unknown };
-    };
-    error.code = response.status;
-    error.response = { status: response.status, data: json };
-    throw error;
-  }
+  });
 
   return {
-    id: json.id ?? json.message?.id ?? null,
+    id: res.data.id ?? res.data.message?.id ?? null,
   };
 }
 
-export function createRawEmail(input: {
-  to: string;
-  from?: string | null;
-  subject: string;
-  body: string;
-}) {
-  const to = sanitizeHeader(input.to);
-  if (!to.includes("@")) {
-    throw new Error(`Invalid recipient address: ${input.to || "(empty)"}`);
+export function getGmailErrorMessage(error: unknown) {
+  if (error instanceof Error && !("response" in error) && error.message) {
+    // Local validation errors (invalid recipient, etc.)
+    if (!error.message.toLowerCase().includes("request failed")) {
+      return error.message;
+    }
   }
 
-  const subject = encodeSubject(input.subject || "(no subject)");
-  const body = (input.body || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const from = input.from ? sanitizeHeader(input.from) : null;
-
-  const lines = [
-    `To: ${to}`,
-    from ? `From: ${from}` : null,
-    `Subject: ${subject}`,
-    "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "",
-    body,
-  ].filter((line): line is string => line !== null);
-
-  const message = lines.join("\r\n");
-
-  return Buffer.from(message, "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-export function getGmailErrorMessage(error: unknown) {
   if (!error || typeof error !== "object") {
     return "Gmail draft creation failed.";
   }
@@ -264,7 +218,7 @@ export function getGmailErrorMessage(error: unknown) {
   const err = error as {
     message?: string;
     code?: number | string;
-    errors?: Array<{ message?: string; reason?: string }>;
+    errors?: Array<{ message?: string; reason?: string; domain?: string }>;
     response?: {
       status?: number;
       statusText?: string;
@@ -278,76 +232,75 @@ export function getGmailErrorMessage(error: unknown) {
           message?: string;
           status?: string;
           code?: number;
-          errors?: Array<{ message?: string; reason?: string }>;
+          errors?: Array<{ message?: string; reason?: string; domain?: string }>;
         };
         error_description?: string;
       }
     | string
     | undefined;
 
-  let apiMessage = "";
+  // Prefer the structured Gmail error, then fall back to full JSON.
+  if (data && typeof data === "object" && data.error) {
+    const parts = [
+      data.error.message,
+      data.error.errors?.[0]?.reason
+        ? `reason=${data.error.errors[0].reason}`
+        : null,
+      data.error.errors?.[0]?.message &&
+      data.error.errors[0].message !== data.error.message
+        ? data.error.errors[0].message
+        : null,
+    ].filter(Boolean);
+
+    if (parts.length) {
+      return parts.join(" | ");
+    }
+
+    try {
+      return JSON.stringify(data.error).slice(0, 400);
+    } catch {
+      // continue
+    }
+  }
 
   if (typeof data === "string" && data.trim()) {
-    apiMessage = data.trim();
-  } else if (data && typeof data === "object") {
-    apiMessage =
-      data.error?.errors?.[0]?.message ||
-      data.error?.errors?.[0]?.reason ||
-      data.error?.message ||
-      data.error_description ||
-      "";
+    return data.trim().slice(0, 400);
   }
 
-  if (!apiMessage) {
-    apiMessage =
-      err.errors?.[0]?.message ||
-      err.message ||
-      err.response?.statusText ||
-      "Gmail draft creation failed.";
+  if (err.errors?.[0]?.message) {
+    return err.errors[0].message;
   }
 
-  apiMessage = apiMessage
-    .replace(/^Request failed with status code \d+\s*/i, "")
-    .replace(/^Bad Request:?\s*/i, "")
-    .trim();
-
-  if (!apiMessage || /^bad request$/i.test(apiMessage)) {
-    apiMessage =
-      "Gmail rejected the message. Reconnect Gmail in Settings, then try again with 1–2 contacts first.";
+  if (err.message) {
+    return err.message.replace(/^Request failed with status code \d+\s*/i, "").trim();
   }
 
   const status = err.response?.status ?? err.code;
-  if (status === 401 || status === 403) {
-    return `${apiMessage} Reconnect Gmail in Settings.`;
-  }
-
-  return apiMessage;
+  return `Gmail error${status ? ` (${status})` : ""}. Check Gmail API is enabled in Google Cloud and reconnect Gmail.`;
 }
 
 export function isGmailAuthError(error: unknown) {
   if (!error || typeof error !== "object") return false;
   const err = error as {
     code?: number | string;
-    response?: { status?: number };
+    response?: { status?: number; data?: { error?: { status?: string; message?: string } } };
     message?: string;
   };
   const status = err.response?.status ?? err.code;
   if (status === 401 || status === 403) return true;
-  const message = (err.message ?? "").toLowerCase();
+  const message = `${err.message ?? ""} ${err.response?.data?.error?.message ?? ""}`.toLowerCase();
   return (
     message.includes("invalid_grant") ||
     message.includes("invalid credentials") ||
     message.includes("unauthorized") ||
-    message.includes("insufficient permission")
+    message.includes("insufficient permission") ||
+    message.includes("access_denied") ||
+    message.includes("accessnotconfigured")
   );
 }
 
-function sanitizeHeader(value: string) {
-  return value.replace(/[\r\n]+/g, " ").trim();
-}
-
 function encodeSubject(value: string) {
-  const clean = sanitizeHeader(value);
+  const clean = value.replace(/[\r\n]+/g, " ").trim();
   if (/^[\x20-\x7E]*$/.test(clean)) {
     return clean;
   }

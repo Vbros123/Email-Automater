@@ -5,7 +5,6 @@ import {
   assertGmailAccess,
   createGmailAuth,
   createGmailDraft,
-  getAccessToken,
   getGmailErrorMessage,
   isGmailAuthError,
   persistGmailTokens,
@@ -28,28 +27,6 @@ type DraftResult = {
   contactId?: string;
   draftId?: string | null;
 };
-
-const GMAIL_CONCURRENCY = 3;
-
-async function mapPool<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-
-  async function run() {
-    while (nextIndex < items.length) {
-      const current = nextIndex++;
-      results[current] = await worker(items[current], current);
-    }
-  }
-
-  const runners = Array.from({ length: Math.min(concurrency, items.length) }, () => run());
-  await Promise.all(runners);
-  return results;
-}
 
 export async function POST(request: NextRequest, { params }: Params) {
   const auth = await requireUser();
@@ -140,11 +117,9 @@ export async function POST(request: NextRequest, { params }: Params) {
   const typedContacts = contacts as Contact[];
 
   let gmailAuth;
-  let accessToken: string;
   try {
     gmailAuth = createGmailAuth(connection);
     await assertGmailAccess(gmailAuth.gmail);
-    accessToken = await getAccessToken(gmailAuth.auth);
   } catch (error) {
     const detail = getGmailErrorMessage(error);
     return NextResponse.json(
@@ -152,68 +127,73 @@ export async function POST(request: NextRequest, { params }: Params) {
         error: detail,
         results: [],
         draftsCreated: 0,
-        message: `Gmail auth failed: ${detail}`,
+        message: `Gmail auth failed: ${detail}. Reconnect Gmail in Settings. Also confirm Gmail API is enabled in Google Cloud Console for this OAuth project.`,
       },
       { status: 401 },
     );
   }
 
-  const { auth: oauthClient } = gmailAuth;
-  const fromAddress = connection.google_email || null;
+  const { gmail, auth: oauthClient } = gmailAuth;
+  // Only use From when we have a real Google address from OAuth userinfo.
+  const fromAddress =
+    connection.google_email && connection.google_email.includes("@")
+      ? connection.google_email
+      : null;
+
+  const draftResults: DraftResult[] = [];
   let stoppedForAuth = false;
 
-  const draftResults = await mapPool(
-    typedContacts,
-    GMAIL_CONCURRENCY,
-    async (contact): Promise<DraftResult> => {
-      if (stoppedForAuth) {
-        return {
-          email: contact.email,
-          contactId: contact.id,
-          status: "failed",
-          detail: "Skipped after Gmail auth failure.",
-        };
+  // Sequential — more reliable than concurrent for Gmail token refresh.
+  for (const contact of typedContacts) {
+    if (stoppedForAuth) {
+      draftResults.push({
+        email: contact.email,
+        contactId: contact.id,
+        status: "failed",
+        detail: "Skipped after Gmail auth failure.",
+      });
+      continue;
+    }
+
+    const personalized = personalizeTemplate(
+      typedTemplate,
+      toPersonalizationContact(contact),
+      {
+        allowUnresolved: true,
+        unsubscribeFooter: campaign.unsubscribe_footer ?? undefined,
+      },
+    );
+
+    try {
+      const draft = await createGmailDraft({
+        gmail,
+        to: contact.email,
+        from: fromAddress,
+        subject: personalized.subject || "(no subject)",
+        body: personalized.body || " ",
+      });
+
+      draftResults.push({
+        email: contact.email,
+        contactId: contact.id,
+        status: "draft_created",
+        detail: draft.id ?? undefined,
+        draftId: draft.id ?? null,
+      });
+    } catch (error) {
+      const detail = getGmailErrorMessage(error);
+      draftResults.push({
+        email: contact.email,
+        contactId: contact.id,
+        status: "failed",
+        detail,
+      });
+
+      if (isGmailAuthError(error)) {
+        stoppedForAuth = true;
       }
-
-      const personalized = personalizeTemplate(
-        typedTemplate,
-        toPersonalizationContact(contact),
-        {
-          allowUnresolved: true,
-          unsubscribeFooter: campaign.unsubscribe_footer ?? undefined,
-        },
-      );
-
-      try {
-        const draft = await createGmailDraft({
-          accessToken,
-          to: contact.email,
-          from: fromAddress,
-          subject: personalized.subject || "(no subject)",
-          body: personalized.body || "",
-        });
-
-        return {
-          email: contact.email,
-          contactId: contact.id,
-          status: "draft_created",
-          detail: draft.id ?? undefined,
-          draftId: draft.id ?? null,
-        };
-      } catch (error) {
-        if (isGmailAuthError(error)) {
-          stoppedForAuth = true;
-        }
-
-        return {
-          email: contact.email,
-          contactId: contact.id,
-          status: "failed",
-          detail: getGmailErrorMessage(error),
-        };
-      }
-    },
-  );
+    }
+  }
 
   const successes = draftResults.filter((result) => result.status === "draft_created");
   const failures = draftResults.filter((result) => result.status === "failed");
@@ -273,16 +253,15 @@ export async function POST(request: NextRequest, { params }: Params) {
     .eq("id", campaign.id)
     .eq("user_id", auth.user.id);
 
-  const results = draftResults.map(({ email, status, detail }) => ({
-    email,
-    status,
-    detail,
-  }));
-
   return NextResponse.json({
-    results,
+    results: draftResults.map(({ email, status, detail }) => ({
+      email,
+      status,
+      detail,
+    })),
     draftsCreated: successfulDrafts,
     failedCount,
+    googleEmail: fromAddress,
     message:
       successfulDrafts > 0
         ? `Created ${successfulDrafts} Gmail drafts${failedCount ? ` (${failedCount} failed)` : ""}.`

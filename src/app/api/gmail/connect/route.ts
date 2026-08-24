@@ -2,17 +2,20 @@ import crypto from "crypto";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/api";
-import { hasEncryptionEnv, hasGoogleEnv } from "@/lib/env";
+import { env, hasEncryptionEnv, hasGoogleEnv } from "@/lib/env";
 import { getGoogleAuthUrl } from "@/lib/gmail/client";
 
 export async function GET() {
   const auth = await requireUser();
-  if ("error" in auth) return auth.error;
+  if ("error" in auth) {
+    return NextResponse.redirect(
+      `${env.NEXT_PUBLIC_APP_URL}/login?next=/dashboard/settings`,
+    );
+  }
 
   if (!hasGoogleEnv() || !hasEncryptionEnv()) {
-    return NextResponse.json(
-      { error: "Google OAuth and ENCRYPTION_KEY environment variables are required." },
-      { status: 500 },
+    return NextResponse.redirect(
+      `${env.NEXT_PUBLIC_APP_URL}/dashboard/settings?gmail=failed&detail=missing_env`,
     );
   }
 

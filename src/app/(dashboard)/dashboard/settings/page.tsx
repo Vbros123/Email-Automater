@@ -1,14 +1,12 @@
-import Link from "next/link";
 import {
   CheckCircle2Icon,
-  MailCheckIcon,
   PlugZapIcon,
   UnplugIcon,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { GmailConnectionActions } from "@/components/settings/gmail-connection-actions";
 import { hasEncryptionEnv, hasGoogleEnv } from "@/lib/env";
 import { GMAIL_SCOPES } from "@/lib/gmail/client";
 import { getCurrentUser } from "@/lib/supabase/server";
@@ -16,7 +14,7 @@ import { getCurrentUser } from "@/lib/supabase/server";
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ gmail?: string }>;
+  searchParams: Promise<{ gmail?: string; detail?: string }>;
 }) {
   const { supabase, user } = await getCurrentUser();
   const params = await searchParams;
@@ -49,7 +47,8 @@ export default async function SettingsPage({
           <CheckCircle2Icon />
           <AlertTitle>Gmail connected</AlertTitle>
           <AlertDescription>
-            Fresh tokens saved. You can create Gmail drafts from Campaigns.
+            Tokens saved{connection?.google_email ? ` for ${connection.google_email}` : ""}.
+            You can create drafts from Campaigns.
           </AlertDescription>
         </Alert>
       )}
@@ -69,8 +68,20 @@ export default async function SettingsPage({
           <PlugZapIcon />
           <AlertTitle>Gmail connection failed</AlertTitle>
           <AlertDescription>
-            Check GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI,
-            and that Gmail API is enabled in Google Cloud Console.
+            {params.detail
+              ? `Details: ${params.detail}`
+              : "Check GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, ENCRYPTION_KEY, and that Gmail API is enabled."}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {params.gmail === "invalid_state" && (
+        <Alert>
+          <PlugZapIcon />
+          <AlertTitle>OAuth state mismatch</AlertTitle>
+          <AlertDescription>
+            The connect session expired or cookies were blocked. Try Connect
+            Gmail again from this same browser tab.
           </AlertDescription>
         </Alert>
       )}
@@ -89,8 +100,8 @@ export default async function SettingsPage({
             >
               Google Account → Third-party access
             </a>
-            , remove EmailFlow AI / your app, then click Connect Gmail again and
-            accept all permissions.
+            , remove this app, then Connect Gmail again and accept all
+            permissions.
           </AlertDescription>
         </Alert>
       )}
@@ -117,29 +128,12 @@ export default async function SettingsPage({
               </Badge>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <Link
-                href="/api/gmail/connect"
-                className={buttonVariants({ variant: "outline" })}
-              >
-                <MailCheckIcon data-icon="inline-start" />
-                {connection ? "Reconnect Gmail" : "Connect Gmail"}
-              </Link>
-              {connection ? (
-                <Link
-                  href="/api/gmail/disconnect"
-                  className={buttonVariants({ variant: "secondary" })}
-                >
-                  <UnplugIcon data-icon="inline-start" />
-                  Disconnect
-                </Link>
-              ) : null}
-            </div>
+            <GmailConnectionActions connected={Boolean(connection)} />
 
             <p className="text-xs text-muted-foreground">
               If drafts fail with invalid_grant: Disconnect here, remove the app
-              at myaccount.google.com/permissions, then Connect again. Apps in
-              Google Cloud &quot;Testing&quot; mode expire refresh tokens after 7 days.
+              at myaccount.google.com/permissions, then Connect again. Google
+              Cloud apps in Testing mode expire refresh tokens after 7 days.
             </p>
           </CardContent>
         </Card>

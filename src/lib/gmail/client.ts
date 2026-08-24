@@ -229,13 +229,6 @@ export function createRawEmail(input: {
   body: string;
 }) {
   const to = sanitizeHeader(input.to);
-  if (!to || !/^[^
-@]+@[^
-@]+
-[^
-@]+$/.test(to) === false && !to.includes("@")) {
-    // keep simple check
-  }
   if (!to.includes("@")) {
     throw new Error(`Invalid recipient address: ${input.to || "(empty)"}`);
   }

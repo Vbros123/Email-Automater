@@ -53,8 +53,8 @@ export function AppShell({
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[240px_1fr] lg:px-8">
-        <aside className="lg:sticky lg:top-22 lg:h-fit">
+      <div className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(240px,240px)_minmax(0,1fr)] lg:px-8">
+        <aside className="min-w-0 lg:sticky lg:top-20 lg:h-fit">
           <nav className="flex gap-2 overflow-x-auto rounded-lg border bg-background p-2 lg:flex-col lg:overflow-visible">
             {navItems.map((item) => {
               const active =

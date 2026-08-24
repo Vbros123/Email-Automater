@@ -213,7 +213,7 @@ export function CampaignBuilder({
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex min-w-0 flex-col gap-6">
       <div className="flex flex-col gap-2">
         <h1 className="text-3xl font-semibold">Campaigns</h1>
         <p className="text-muted-foreground">
@@ -222,8 +222,8 @@ export function CampaignBuilder({
         </p>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[0.78fr_1.22fr]">
-        <Card className="rounded-lg">
+      <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(280px,0.78fr)_minmax(0,1.22fr)]">
+        <Card className="min-w-0 rounded-lg">
           <CardHeader>
             <CardTitle>Campaign setup</CardTitle>
           </CardHeader>
@@ -321,7 +321,7 @@ export function CampaignBuilder({
               </div>
             </Field>
 
-            <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
               <Button
                 onClick={createCampaign}
                 disabled={
@@ -362,7 +362,7 @@ export function CampaignBuilder({
           </CardContent>
         </Card>
 
-        <div className="flex flex-col gap-4">
+        <div className="flex min-w-0 flex-col gap-4">
           {missingVariables.length > 0 && !overrideUnresolved && (
             <Alert>
               <AlertTriangleIcon />
@@ -374,7 +374,7 @@ export function CampaignBuilder({
             </Alert>
           )}
 
-          <Card className="rounded-lg">
+          <Card className="min-w-0 rounded-lg">
             <CardHeader>
               <CardTitle>Personalized preview</CardTitle>
             </CardHeader>
@@ -383,11 +383,11 @@ export function CampaignBuilder({
                 previews.slice(0, 5).map(({ contact, preview }) => (
                   <div key={contact.id} className="rounded-lg border bg-muted/30 p-4">
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div>
+                      <div className="min-w-0">
                         <div className="font-medium">
                           {contact.first_name} {contact.last_name}
                         </div>
-                        <div className="text-sm text-muted-foreground">
+                        <div className="truncate text-sm text-muted-foreground">
                           {contact.email}
                         </div>
                       </div>
@@ -401,7 +401,7 @@ export function CampaignBuilder({
                     </div>
                     <div className="flex flex-col gap-3 rounded-lg bg-background p-4 text-sm">
                       <p className="font-medium">{preview.subject}</p>
-                      <pre className="whitespace-pre-wrap font-sans leading-6 text-muted-foreground">
+                      <pre className="whitespace-pre-wrap break-words font-sans leading-6 text-muted-foreground">
                         {preview.body}
                       </pre>
                     </div>
@@ -416,11 +416,11 @@ export function CampaignBuilder({
           </Card>
 
           {results.length > 0 && (
-            <Card className="rounded-lg">
+            <Card className="min-w-0 rounded-lg">
               <CardHeader>
                 <CardTitle>Draft/send results</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="min-w-0">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -444,7 +444,9 @@ export function CampaignBuilder({
                             {result.status}
                           </Badge>
                         </TableCell>
-                        <TableCell>{result.detail ?? "None"}</TableCell>
+                        <TableCell className="max-w-[240px] truncate">
+                          {result.detail ?? "None"}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -455,11 +457,11 @@ export function CampaignBuilder({
         </div>
       </div>
 
-      <Card className="rounded-lg">
+      <Card className="min-w-0 rounded-lg">
         <CardHeader>
           <CardTitle>Recent campaigns</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="min-w-0">
           <Table>
             <TableHeader>
               <TableRow>

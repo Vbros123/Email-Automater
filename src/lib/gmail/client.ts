@@ -120,14 +120,13 @@ export async function persistGmailTokens(
 }
 
 export async function assertGmailAccess(gmail: gmail_v1.Gmail) {
-  // Use drafts.list — allowed under gmail.compose (unlike users.getProfile).
   await gmail.users.drafts.list({ userId: "me", maxResults: 1 });
 }
 
 /**
- * Build a minimal RFC 2822 message and base64url-encode it for Gmail drafts.create.
- * Intentionally omits From — Gmail assigns the authenticated mailbox.
- * Setting From to a non-connected address causes HTTP 400 Bad Request.
+ * RFC 2822 message → base64url, matching Google's Node samples.
+ * No From header (Gmail sets the connected account).
+ * No 7bit CTE (breaks on non-ASCII body text).
  */
 export function createRawEmail(input: {
   to: string;
@@ -135,24 +134,27 @@ export function createRawEmail(input: {
   body: string;
 }) {
   const to = sanitizeHeader(input.to);
-  const subject = encodeSubject(input.subject || "(no subject)");
-  const body = (input.body || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\n/g, "\r\n");
+  if (!to || !to.includes("@")) {
+    throw new Error(`Invalid recipient address: ${input.to || "(empty)"}`);
+  }
 
-  const mime = [
+  const subject = encodeSubject(input.subject || "(no subject)");
+  const body = (input.body || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // Official samples use \n separators and minimal headers.
+  const message = [
     `To: ${to}`,
     `Subject: ${subject}`,
-    "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: 7bit",
+    `Content-Type: text/plain; charset="UTF-8"`,
     "",
     body,
-  ].join("\r\n");
+  ].join("\n");
 
-  // Node base64url is URL-safe and strips padding — what Gmail expects.
-  return Buffer.from(mime, "utf8").toString("base64url");
+  return Buffer.from(message, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 export function getGmailErrorMessage(error: unknown) {
@@ -167,7 +169,12 @@ export function getGmailErrorMessage(error: unknown) {
     response?: {
       status?: number;
       statusText?: string;
-      data?: {
+      data?: unknown;
+    };
+  };
+
+  const data = err.response?.data as
+    | {
         error?: {
           message?: string;
           status?: string;
@@ -175,30 +182,44 @@ export function getGmailErrorMessage(error: unknown) {
           errors?: Array<{ message?: string; reason?: string }>;
         };
         error_description?: string;
-      };
-    };
-  };
+      }
+    | string
+    | undefined;
 
-  const nested =
-    err.response?.data?.error?.errors?.[0]?.message ||
-    err.response?.data?.error?.errors?.[0]?.reason ||
-    err.errors?.[0]?.message;
+  let apiMessage = "";
 
-  const apiMessage =
-    nested ||
-    err.response?.data?.error?.message ||
-    err.response?.data?.error_description ||
-    err.message ||
-    err.response?.statusText ||
-    "Gmail draft creation failed.";
+  if (typeof data === "string" && data.trim()) {
+    apiMessage = data.trim();
+  } else if (data && typeof data === "object") {
+    apiMessage =
+      data.error?.errors?.[0]?.message ||
+      data.error?.errors?.[0]?.reason ||
+      data.error?.message ||
+      data.error_description ||
+      "";
+  }
+
+  if (!apiMessage) {
+    apiMessage =
+      err.errors?.[0]?.message ||
+      err.message ||
+      err.response?.statusText ||
+      "Gmail draft creation failed.";
+  }
+
+  // Strip duplicate "Bad Request" noise from googleapis wrapper messages.
+  apiMessage = apiMessage
+    .replace(/^Request failed with status code 400\s*/i, "")
+    .replace(/^Bad Request:?\s*/i, "")
+    .trim();
+
+  if (!apiMessage) {
+    apiMessage = "Invalid email payload (check recipient addresses and template content).";
+  }
 
   const status = err.response?.status ?? err.code;
   if (status === 401 || status === 403) {
     return `${apiMessage} Reconnect Gmail in Settings.`;
-  }
-
-  if (status === 400) {
-    return `Bad Request: ${apiMessage}`;
   }
 
   return apiMessage;
@@ -228,7 +249,6 @@ function sanitizeHeader(value: string) {
 
 function encodeSubject(value: string) {
   const clean = sanitizeHeader(value);
-  // ASCII subjects can stay plain; anything else needs RFC 2047.
   if (/^[\x20-\x7E]*$/.test(clean)) {
     return clean;
   }

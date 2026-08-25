@@ -4,7 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2Icon, MailCheckIcon, UnplugIcon } from "lucide-react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 export function GmailConnectionActions({ connected }: { connected: boolean }) {
   const router = useRouter();
@@ -33,12 +34,13 @@ export function GmailConnectionActions({ connected }: { connected: boolean }) {
 
   return (
     <div className="flex flex-wrap gap-2">
-      <Button variant="outline" asChild>
-        <a href="/api/gmail/connect">
-          <MailCheckIcon data-icon="inline-start" />
-          {connected ? "Reconnect Gmail" : "Connect Gmail"}
-        </a>
-      </Button>
+      <a
+        href="/api/gmail/connect"
+        className={cn(buttonVariants({ variant: "outline" }))}
+      >
+        <MailCheckIcon data-icon="inline-start" />
+        {connected ? "Reconnect Gmail" : "Connect Gmail"}
+      </a>
 
       {connected ? (
         <Button

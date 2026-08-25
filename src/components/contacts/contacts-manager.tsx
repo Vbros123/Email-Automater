@@ -42,7 +42,9 @@ export function ContactsManager({ initialContacts }: { initialContacts: Contact[
   const [contacts, setContacts] = useState(initialContacts);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDeletingAll, setIsDeletingAll] = useState(false);
   const [preview, setPreview] = useState<CsvImportPreview | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -113,6 +115,34 @@ export function ContactsManager({ initialContacts }: { initialContacts: Contact[
     toast.success("Contact deleted.");
   }
 
+  async function deleteAllContacts() {
+    if (!contacts.length) return;
+
+    setIsDeletingAll(true);
+    try {
+      const response = await fetch("/api/contacts?all=true", { method: "DELETE" });
+      const json = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(json.error ?? "Could not delete contacts.");
+      }
+
+      setContacts([]);
+      setDeleteAllOpen(false);
+      toast.success(
+        typeof json.deleted === "number"
+          ? `Deleted ${json.deleted} contacts.`
+          : "All contacts deleted.",
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not delete contacts.",
+      );
+    } finally {
+      setIsDeletingAll(false);
+    }
+  }
+
   async function handleCsv(file: File) {
     const text = await file.text();
     setPreview(parseContactsCsv(text));
@@ -154,58 +184,105 @@ export function ContactsManager({ initialContacts }: { initialContacts: Contact[
             Add trusted recipients manually or validate a CSV before importing.
           </p>
         </div>
-        <Dialog open={open} onOpenChange={setOpen}>
-          <DialogTrigger render={<Button />}>
-            <PlusIcon data-icon="inline-start" />
-            Add contact
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Add contact</DialogTitle>
-              <DialogDescription>
-                Save an individual contact for future draft creation.
-              </DialogDescription>
-            </DialogHeader>
-            <form action={createContact} className="flex flex-col gap-5">
-              <FieldGroup>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Field>
-                    <FieldLabel htmlFor="firstName">First name</FieldLabel>
-                    <Input id="firstName" name="firstName" required />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="lastName">Last name</FieldLabel>
-                    <Input id="lastName" name="lastName" required />
-                  </Field>
-                </div>
-                <Field>
-                  <FieldLabel htmlFor="email">Email</FieldLabel>
-                  <Input id="email" name="email" type="email" required />
-                </Field>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Field>
-                    <FieldLabel htmlFor="company">Company</FieldLabel>
-                    <Input id="company" name="company" />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="role">Role</FieldLabel>
-                    <Input id="role" name="role" />
-                  </Field>
-                </div>
-                <Field>
-                  <FieldLabel htmlFor="notes">Notes</FieldLabel>
-                  <Textarea id="notes" name="notes" />
-                </Field>
-              </FieldGroup>
+        <div className="flex flex-wrap gap-2">
+          <Dialog open={deleteAllOpen} onOpenChange={setDeleteAllOpen}>
+            <DialogTrigger
+              render={
+                <Button
+                  variant="destructive"
+                  disabled={contacts.length === 0}
+                />
+              }
+            >
+              <Trash2Icon data-icon="inline-start" />
+              Delete all
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Delete all contacts?</DialogTitle>
+                <DialogDescription>
+                  This permanently removes all {contacts.length} contact
+                  {contacts.length === 1 ? "" : "s"} from your account. This cannot
+                  be undone.
+                </DialogDescription>
+              </DialogHeader>
               <DialogFooter>
-                <Button type="submit" disabled={isSaving}>
-                  {isSaving && <Loader2Icon data-icon="inline-start" className="animate-spin" />}
-                  Save contact
+                <Button
+                  variant="outline"
+                  onClick={() => setDeleteAllOpen(false)}
+                  disabled={isDeletingAll}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => void deleteAllContacts()}
+                  disabled={isDeletingAll}
+                >
+                  {isDeletingAll && (
+                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                  )}
+                  Delete all contacts
                 </Button>
               </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger render={<Button />}>
+              <PlusIcon data-icon="inline-start" />
+              Add contact
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add contact</DialogTitle>
+                <DialogDescription>
+                  Save an individual contact for future draft creation.
+                </DialogDescription>
+              </DialogHeader>
+              <form action={createContact} className="flex flex-col gap-5">
+                <FieldGroup>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="firstName">First name</FieldLabel>
+                      <Input id="firstName" name="firstName" required />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="lastName">Last name</FieldLabel>
+                      <Input id="lastName" name="lastName" required />
+                    </Field>
+                  </div>
+                  <Field>
+                    <FieldLabel htmlFor="email">Email</FieldLabel>
+                    <Input id="email" name="email" type="email" required />
+                  </Field>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="company">Company</FieldLabel>
+                      <Input id="company" name="company" />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="role">Role</FieldLabel>
+                      <Input id="role" name="role" />
+                    </Field>
+                  </div>
+                  <Field>
+                    <FieldLabel htmlFor="notes">Notes</FieldLabel>
+                    <Textarea id="notes" name="notes" />
+                  </Field>
+                </FieldGroup>
+                <DialogFooter>
+                  <Button type="submit" disabled={isSaving}>
+                    {isSaving && (
+                      <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                    )}
+                    Save contact
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[0.72fr_1.28fr]">

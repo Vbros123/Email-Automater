@@ -65,10 +65,27 @@ export async function DELETE(request: NextRequest) {
   const auth = await requireUser();
   if ("error" in auth) return auth.error;
 
+  const deleteAll = request.nextUrl.searchParams.get("all") === "true";
   const id = request.nextUrl.searchParams.get("id");
 
+  if (deleteAll) {
+    const { error, count } = await auth.supabase
+      .from("contacts")
+      .delete({ count: "exact" })
+      .eq("user_id", auth.user.id);
+
+    if (error) {
+      return NextResponse.json({ error: "Could not delete contacts." }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, deleted: count ?? 0 });
+  }
+
   if (!id) {
-    return NextResponse.json({ error: "Contact id is required." }, { status: 400 });
+    return NextResponse.json(
+      { error: "Contact id is required, or pass all=true to delete every contact." },
+      { status: 400 },
+    );
   }
 
   const { error } = await auth.supabase

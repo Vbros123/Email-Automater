@@ -83,6 +83,7 @@ export function CampaignBuilder({
   const [sendDialogOpen, setSendDialogOpen] = useState(false);
   const [permissionConfirmed, setPermissionConfirmed] = useState(false);
   const [results, setResults] = useState<ApiResult[]>([]);
+  const [sendProgress, setSendProgress] = useState("");
 
   const selectedTemplate = templates.find((template) => template.id === templateId);
   const selectedContacts = contacts.filter((contact) =>
@@ -206,33 +207,71 @@ export function CampaignBuilder({
     if (!campaignId || !permissionConfirmed) return;
 
     setIsSending(true);
-    toast.message("Sending emails…", {
-      description: "Large batches can take a minute. Keep this tab open.",
-      duration: 6000,
-    });
+    setSendProgress("Sending… keep this tab open.");
+
+    let totalSent = 0;
+    let totalFailed = 0;
+    let allResults: ApiResult[] = [];
+    let rounds = 0;
+    const maxRounds = 10;
 
     try {
-      const response = await fetch(`/api/campaigns/${campaignId}/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          confirmSend: true,
-          permissionConfirmed: true,
-        }),
-      });
-      const json = await response.json();
+      // Keep calling until every draft is sent or we hit a hard stop.
+      while (rounds < maxRounds) {
+        rounds += 1;
+        setSendProgress(
+          rounds === 1
+            ? "Sending drafts…"
+            : `Continuing send (round ${rounds})…`,
+        );
 
-      if (!response.ok) {
-        throw new Error(json.error ?? "Could not send emails.");
+        const response = await fetch(`/api/campaigns/${campaignId}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            confirmSend: true,
+            permissionConfirmed: true,
+          }),
+        });
+        const json = await response.json();
+
+        if (!response.ok) {
+          throw new Error(json.error ?? json.message ?? "Could not send emails.");
+        }
+
+        const batchResults: ApiResult[] = json.results ?? [];
+        allResults = mergeResults(allResults, batchResults);
+        setResults(allResults);
+
+        totalSent += json.sentCount ?? 0;
+        totalFailed += json.failedCount ?? 0;
+        const remaining = json.remainingCount ?? 0;
+
+        if (remaining <= 0) {
+          setSendDialogOpen(false);
+          setSendProgress("");
+          toast.success(
+            json.message ??
+              `Sent ${totalSent} email${totalSent === 1 ? "" : "s"}${totalFailed ? ` (${totalFailed} failed)` : ""}.`,
+          );
+          return;
+        }
+
+        // Brief pause before the next batch so Gmail quotas recover.
+        setSendProgress(`${remaining} drafts left — continuing…`);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
       }
 
-      setResults(json.results ?? []);
       setSendDialogOpen(false);
-      toast.success(`Sent ${json.sentCount} emails.`);
+      toast.message(`Sent ${totalSent} so far.`, {
+        description:
+          "Some drafts may still be waiting. Click Send emails again to finish the rest.",
+      });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not send emails.");
     } finally {
       setIsSending(false);
+      setSendProgress("");
     }
   }
 
@@ -356,12 +395,21 @@ export function CampaignBuilder({
               </Alert>
             )}
 
+            {isSending && sendProgress && (
+              <Alert className="border-primary/30 bg-accent">
+                <Loader2Icon className="animate-spin" />
+                <AlertTitle>Sending emails…</AlertTitle>
+                <AlertDescription>{sendProgress}</AlertDescription>
+              </Alert>
+            )}
+
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
               <Button
                 onClick={createCampaign}
                 disabled={
                   isCreating ||
                   isDrafting ||
+                  isSending ||
                   !name.trim() ||
                   !templateId ||
                   selectedContactIds.length === 0
@@ -377,7 +425,7 @@ export function CampaignBuilder({
               <Button
                 variant="outline"
                 onClick={createDrafts}
-                disabled={isDrafting || isCreating || !activeCampaignId}
+                disabled={isDrafting || isCreating || isSending || !activeCampaignId}
               >
                 {isDrafting ? (
                   <Loader2Icon data-icon="inline-start" className="animate-spin" />
@@ -389,7 +437,7 @@ export function CampaignBuilder({
               <Button
                 variant="secondary"
                 onClick={() => setSendDialogOpen(true)}
-                disabled={!activeCampaignId || isDrafting}
+                disabled={!activeCampaignId || isDrafting || isSending}
               >
                 <SendIcon data-icon="inline-start" />
                 Send emails
@@ -537,8 +585,9 @@ export function CampaignBuilder({
           <DialogHeader>
             <DialogTitle>Confirm sending</DialogTitle>
             <DialogDescription>
-              Sending uses existing Gmail drafts. This action is intentionally
-              separate from draft creation.
+              Sends every Gmail draft still marked ready for this campaign. If
+              Gmail rate-limits mid-batch, the app continues automatically until
+              all drafts are sent.
             </DialogDescription>
           </DialogHeader>
           <Field orientation="horizontal" className="items-start rounded-lg border p-3">
@@ -568,11 +617,29 @@ export function CampaignBuilder({
               ) : (
                 <SendIcon data-icon="inline-start" />
               )}
-              Confirm send
+              {isSending ? "Sending…" : "Confirm send"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   );
+}
+
+function mergeResults(previous: ApiResult[], next: ApiResult[]) {
+  const byEmail = new Map<string, ApiResult>();
+
+  for (const item of previous) {
+    byEmail.set(item.email, item);
+  }
+
+  for (const item of next) {
+    const existing = byEmail.get(item.email);
+    // Prefer terminal states over draft_created placeholders.
+    if (!existing || item.status === "sent" || item.status === "failed") {
+      byEmail.set(item.email, item);
+    }
+  }
+
+  return Array.from(byEmail.values());
 }

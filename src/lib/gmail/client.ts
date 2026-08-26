@@ -219,6 +219,49 @@ export async function createGmailDraft(input: {
   };
 }
 
+export async function sendGmailDraftWithRetry(
+  gmail: gmail_v1.Gmail,
+  draftId: string,
+  attempts = 4,
+) {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const sent = await gmail.users.drafts.send({
+        userId: "me",
+        requestBody: { id: draftId },
+      });
+
+      return {
+        id: sent.data.id ?? null,
+      };
+    } catch (error) {
+      lastError = error;
+
+      if (isGmailAuthError(error)) {
+        throw error;
+      }
+
+      if (isGmailRateLimitError(error) && attempt < attempts) {
+        // 1s, 2s, 4s backoff
+        await sleep(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+
+      // Transient 5xx
+      if (isTransientGmailError(error) && attempt < attempts) {
+        await sleep(500 * attempt);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
 export function getGmailErrorMessage(error: unknown) {
   if (error instanceof Error && !("response" in error) && error.message) {
     if (!error.message.toLowerCase().includes("request failed")) {
@@ -306,13 +349,28 @@ export function getGmailErrorMessage(error: unknown) {
 
 export function isGmailAuthError(error: unknown) {
   if (!error || typeof error !== "object") return false;
+  if (isGmailRateLimitError(error)) return false;
+
   const err = error as {
     code?: number | string;
     response?: { status?: number; data?: unknown };
     message?: string;
   };
   const status = err.response?.status ?? err.code;
-  if (status === 401 || status === 403) return true;
+  if (status === 401) return true;
+  if (status === 403) {
+    const message = `${err.message ?? ""} ${JSON.stringify(err.response?.data ?? "")}`.toLowerCase();
+    // 403 rate limits are not auth failures
+    if (
+      message.includes("rate limit") ||
+      message.includes("user-rate") ||
+      message.includes("quota")
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   const message = `${err.message ?? ""} ${JSON.stringify(err.response?.data ?? "")}`.toLowerCase();
   return (
     message.includes("invalid_grant") ||
@@ -324,10 +382,43 @@ export function isGmailAuthError(error: unknown) {
   );
 }
 
+export function isGmailRateLimitError(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const err = error as {
+    code?: number | string;
+    response?: { status?: number; data?: unknown };
+    message?: string;
+  };
+  const status = Number(err.response?.status ?? err.code);
+  if (status === 429) return true;
+
+  const message = `${err.message ?? ""} ${JSON.stringify(err.response?.data ?? "")}`.toLowerCase();
+  return (
+    message.includes("rate limit") ||
+    message.includes("user-rate") ||
+    message.includes("quota exceeded") ||
+    message.includes("resource_exhausted")
+  );
+}
+
+export function isTransientGmailError(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const err = error as {
+    code?: number | string;
+    response?: { status?: number };
+  };
+  const status = Number(err.response?.status ?? err.code);
+  return status >= 500 && status < 600;
+}
+
 function encodeSubject(value: string) {
   const clean = value.replace(/[\r\n]+/g, " ").trim();
   if (/^[\x20-\x7E]*$/.test(clean)) {
     return clean;
   }
   return `=?UTF-8?B?${Buffer.from(clean, "utf8").toString("base64")}?=`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

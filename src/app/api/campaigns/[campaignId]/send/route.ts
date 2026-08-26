@@ -5,37 +5,25 @@ import {
   createGmailAuth,
   getGmailErrorMessage,
   isGmailAuthError,
+  isGmailRateLimitError,
   persistGmailTokens,
+  sendGmailDraftWithRetry,
 } from "@/lib/gmail/client";
 import { checkRateLimit } from "@/lib/security/rate-limit";
 import { sendConfirmationSchema } from "@/lib/validators";
 
-export const maxDuration = 60;
+// Allow long batches (Pro plans honor this; Hobby may still hard-cap).
+export const maxDuration = 300;
 
 type Params = {
   params: Promise<{ campaignId: string }>;
 };
 
-const GMAIL_CONCURRENCY = 5;
+/** Pace sends so Gmail user-rate limits don't kill the batch midway. */
+const SEND_GAP_MS = 250;
 
-async function mapPool<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-
-  async function run() {
-    while (nextIndex < items.length) {
-      const current = nextIndex++;
-      results[current] = await worker(items[current]);
-    }
-  }
-
-  const runners = Array.from({ length: Math.min(concurrency, items.length) }, () => run());
-  await Promise.all(runners);
-  return results;
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function POST(request: NextRequest, { params }: Params) {
@@ -43,7 +31,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   if ("error" in auth) return auth.error;
 
   const limit = checkRateLimit(`gmail:send:${auth.user.id}`, {
-    limit: 5,
+    limit: 20,
     windowMs: 60_000,
   });
 
@@ -98,7 +86,13 @@ export async function POST(request: NextRequest, { params }: Params) {
 
   if (!recipients?.length) {
     return NextResponse.json(
-      { error: "No Gmail drafts are ready to send." },
+      {
+        error: "No Gmail drafts are ready to send.",
+        results: [],
+        sentCount: 0,
+        remainingCount: 0,
+        failedCount: 0,
+      },
       { status: 400 },
     );
   }
@@ -115,52 +109,105 @@ export async function POST(request: NextRequest, { params }: Params) {
   }
 
   const { gmail, auth: oauthClient } = gmailAuth;
-  let stoppedForAuth = false;
-
   const ready = recipients.filter((recipient) => recipient.gmail_draft_id);
 
-  const outcome = await mapPool(ready, GMAIL_CONCURRENCY, async (recipient) => {
+  type Outcome = {
+    id: string;
+    email: string;
+    status: "sent" | "failed" | "pending";
+    detail?: string;
+    messageId: string | null;
+  };
+
+  const outcome: Outcome[] = [];
+  let stoppedForAuth = false;
+
+  // Sequential + paced — more reliable than concurrent for Gmail send quotas.
+  for (let i = 0; i < ready.length; i++) {
+    const recipient = ready[i];
+
     if (stoppedForAuth) {
-      return {
+      outcome.push({
         id: recipient.id,
         email: recipient.email,
-        status: "failed" as const,
-        detail: "Skipped after Gmail auth failure.",
-        messageId: null as string | null,
-      };
+        status: "pending",
+        detail: "Left as draft — will send on next Send click.",
+        messageId: null,
+      });
+      continue;
     }
 
     try {
-      const sent = await gmail.users.drafts.send({
-        userId: "me",
-        requestBody: { id: recipient.gmail_draft_id },
+      const sent = await sendGmailDraftWithRetry(
+        gmail,
+        recipient.gmail_draft_id as string,
+      );
+
+      outcome.push({
+        id: recipient.id,
+        email: recipient.email,
+        status: "sent",
+        detail: sent.id ?? undefined,
+        messageId: sent.id,
       });
 
-      return {
-        id: recipient.id,
-        email: recipient.email,
-        status: "sent" as const,
-        detail: sent.data.id ?? undefined,
-        messageId: sent.data.id ?? null,
-      };
+      if (i < ready.length - 1) {
+        await sleep(SEND_GAP_MS);
+      }
     } catch (error) {
+      const detail = getGmailErrorMessage(error);
+
       if (isGmailAuthError(error)) {
         stoppedForAuth = true;
+        outcome.push({
+          id: recipient.id,
+          email: recipient.email,
+          status: "pending",
+          detail: `${detail} Reconnect Gmail, then Send again for remaining drafts.`,
+          messageId: null,
+        });
+        continue;
       }
 
-      return {
+      if (isGmailRateLimitError(error)) {
+        // Keep as draft_created so the client can continue later.
+        outcome.push({
+          id: recipient.id,
+          email: recipient.email,
+          status: "pending",
+          detail: `Rate limited: ${detail}. Remaining drafts stay ready to send.`,
+          messageId: null,
+        });
+
+        // Mark the rest pending without hammering the API this request.
+        for (let j = i + 1; j < ready.length; j++) {
+          outcome.push({
+            id: ready[j].id,
+            email: ready[j].email,
+            status: "pending",
+            detail: "Left as draft — will send on next Send click.",
+            messageId: null,
+          });
+        }
+        break;
+      }
+
+      // Permanent failure for this recipient only; continue the rest.
+      outcome.push({
         id: recipient.id,
         email: recipient.email,
-        status: "failed" as const,
-        detail: getGmailErrorMessage(error),
-        messageId: null as string | null,
-      };
+        status: "failed",
+        detail,
+        messageId: null,
+      });
     }
-  });
+  }
 
   const sent = outcome.filter((item) => item.status === "sent");
   const failed = outcome.filter((item) => item.status === "failed");
+  const pending = outcome.filter((item) => item.status === "pending");
 
+  // Only update rows that actually changed status.
   await Promise.all([
     ...sent.map((item) =>
       auth.supabase
@@ -185,9 +232,11 @@ export async function POST(request: NextRequest, { params }: Params) {
     ),
   ]);
 
-  if (outcome.length) {
+  // pending stays draft_created — no DB write needed
+
+  if (sent.length || failed.length) {
     await auth.supabase.from("email_activity").insert(
-      outcome.map((item) => ({
+      [...sent, ...failed].map((item) => ({
         user_id: auth.user.id,
         campaign_id: campaign.id,
         recipient_email: item.email,
@@ -205,15 +254,43 @@ export async function POST(request: NextRequest, { params }: Params) {
   }
 
   const sentCount = sent.length;
+  const remainingCount = pending.length;
+  const failedCount = failed.length;
+
+  // Count anything still draft_created in DB for accurate remaining.
+  const { count: dbRemaining } = await auth.supabase
+    .from("campaign_recipients")
+    .select("*", { count: "exact", head: true })
+    .eq("campaign_id", campaign.id)
+    .eq("user_id", auth.user.id)
+    .eq("status", "draft_created");
+
+  const remaining = dbRemaining ?? remainingCount;
 
   await auth.supabase
     .from("campaigns")
-    .update({ status: sentCount ? "sent" : "failed" })
+    .update({
+      status: remaining > 0 ? "drafts_created" : sentCount ? "sent" : "failed",
+    })
     .eq("id", campaign.id)
     .eq("user_id", auth.user.id);
 
+  const message =
+    remaining > 0
+      ? `Sent ${sentCount} email${sentCount === 1 ? "" : "s"}. ${remaining} draft${remaining === 1 ? "" : "s"} still waiting — click Send again to continue.`
+      : failedCount
+        ? `Sent ${sentCount} email${sentCount === 1 ? "" : "s"} (${failedCount} failed).`
+        : `Sent ${sentCount} email${sentCount === 1 ? "" : "s"}.`;
+
   return NextResponse.json({
-    results: outcome.map(({ email, status, detail }) => ({ email, status, detail })),
+    results: outcome.map(({ email, status, detail }) => ({
+      email,
+      status: status === "pending" ? "draft_created" : status,
+      detail,
+    })),
     sentCount,
+    remainingCount: remaining,
+    failedCount,
+    message,
   });
 }
